@@ -45,17 +45,22 @@ type Settings struct {
 	AlertSound  bool `json:"alert_sound"`
 	AlertBell   bool `json:"alert_bell"`
 	AlertTmux   bool `json:"alert_tmux"`
+	// Calendar feed integration
+	CalEnabled   bool `json:"cal_enabled"`
+	CalCacheMins int  `json:"cal_cache_mins"`
 }
 
 func defaultSettings() Settings {
 	return Settings{
-		SnoozeMins:  5,
-		AlertNotify: true,
-		AlertDialog: true,
-		AlertSpeech: true,
-		AlertSound:  true,
-		AlertBell:   true,
-		AlertTmux:   true,
+		SnoozeMins:      5,
+		AlertNotify:     true,
+		AlertDialog:     true,
+		AlertSpeech:     true,
+		AlertSound:      true,
+		AlertBell:       true,
+		AlertTmux:       true,
+		CalEnabled:   false,
+		CalCacheMins: 15,
 	}
 }
 
@@ -150,6 +155,38 @@ func (s *Store) sortTasks() {
 	})
 }
 
+func (s *Store) importCalendarEvents(events []CalendarEvent) []Task {
+	var imported []Task
+	for _, ev := range events {
+		if ev.AllDay {
+			continue
+		}
+		// deduplicate: skip if a task with same time+desc+gcal tag already exists
+		dup := false
+		for _, t := range s.Tasks {
+			if t.Time == ev.StartTime && t.Desc == ev.Summary && hasTag(t.Tags, "gcal") {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		t := s.addTask(ev.StartTime, ev.Summary, Once, []string{"gcal"}, nil)
+		imported = append(imported, t)
+	}
+	return imported
+}
+
+func hasTag(tags []string, tag string) bool {
+	for _, t := range tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) resetDaily() {
 	today := time.Now().Format("2006-01-02")
 	if s.LastReset == today {
@@ -215,6 +252,19 @@ func timeUntil(t Task) time.Duration {
 		return 999 * time.Hour
 	}
 	return time.Until(target)
+}
+
+func nextOccurrenceLabel(t Task) string {
+	now := time.Now()
+	wd := now.Weekday()
+	for i := 1; i <= 7; i++ {
+		next := time.Weekday((int(wd) + i) % 7)
+		if shouldFireOnDay(t, next) {
+			short := weekdayShort[next]
+			return "next " + strings.ToUpper(short[:1]) + short[1:]
+		}
+	}
+	return ""
 }
 
 func fmtDuration(d time.Duration) string {

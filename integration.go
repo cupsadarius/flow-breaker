@@ -13,14 +13,15 @@ import (
 
 // StatusReport is what external tools (Claude Code, scripts) consume
 type StatusReport struct {
-	Timestamp   string       `json:"timestamp"`
-	AlarmFiring bool         `json:"alarm_firing"`
-	AlarmTask   *Task        `json:"alarm_task,omitempty"`
-	Next        *TaskStatus  `json:"next,omitempty"`
-	Overdue     []TaskStatus `json:"overdue"`
-	Upcoming    []TaskStatus `json:"upcoming"`
-	Done        []TaskStatus `json:"done"`
-	Nudge       string       `json:"nudge"`
+	Timestamp      string          `json:"timestamp"`
+	AlarmFiring    bool            `json:"alarm_firing"`
+	AlarmTask      *Task           `json:"alarm_task,omitempty"`
+	Next           *TaskStatus     `json:"next,omitempty"`
+	Overdue        []TaskStatus    `json:"overdue"`
+	Upcoming       []TaskStatus    `json:"upcoming"`
+	Done           []TaskStatus    `json:"done"`
+	Nudge          string          `json:"nudge"`
+	CalendarEvents []CalendarEvent `json:"calendar_events,omitempty"`
 }
 
 type TaskStatus struct {
@@ -154,7 +155,24 @@ func handleConn(conn net.Conn, store *Store, alarm *alarmState) {
 		} else {
 			conn.Write([]byte("false\n"))
 		}
+	case "calendar":
+		if store.Settings.CalEnabled {
+			feeds, err := loadFeeds()
+			if err != nil {
+				conn.Write([]byte(fmt.Sprintf(`{"error":%q}`, err.Error()) + "\n"))
+				return
+			}
+			events, err := getCachedOrFetchEvents(feeds, store.Settings.CalCacheMins)
+			if err != nil {
+				conn.Write([]byte(fmt.Sprintf(`{"error":%q}`, err.Error()) + "\n"))
+			} else {
+				data, _ := json.Marshal(events)
+				conn.Write(data)
+			}
+		} else {
+			conn.Write([]byte(`{"error":"calendar not enabled"}` + "\n"))
+		}
 	default:
-		conn.Write([]byte(`{"error":"unknown command","commands":["status","nudge","next","overdue","alarm"]}` + "\n"))
+		conn.Write([]byte(`{"error":"unknown command","commands":["status","nudge","next","overdue","alarm","calendar"]}` + "\n"))
 	}
 }
