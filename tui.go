@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -48,10 +49,43 @@ type model struct {
 	confirmDel     bool
 	settingsMode   bool
 	settingsCursor int
+	// calendar integration
+	calEvents       []CalendarEvent
+	calSelected     []bool
+	calCursor       int
+	calSuggestMode  bool
+	calTimelineMode bool
+	calLoading      bool
+	calError        string
+	// feed management
+	feedsMode       bool
+	feedsCursor     int
+	feedsList       []CalendarFeed
+	feedsAddURL     bool
+	feedsAddLabel   bool
+	feedsInputURL   string
+	feedsInputLabel string
+	feedsConfirmDel bool
+	feedsMsg        string
 }
 
 type tickMsg time.Time
 type macAlertMsg string
+type calEventsMsg struct {
+	events []CalendarEvent
+	err    error
+}
+
+func fetchCalEventsCmd(cacheMins int) tea.Cmd {
+	return func() tea.Msg {
+		feeds, err := loadFeeds()
+		if err != nil {
+			return calEventsMsg{err: err}
+		}
+		events, err := getCachedOrFetchEvents(feeds, cacheMins)
+		return calEventsMsg{events: events, err: err}
+	}
+}
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
@@ -71,7 +105,12 @@ func pollMacAlert() tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), pollMacAlert())
+	cmds := []tea.Cmd{tickCmd(), pollMacAlert()}
+	if m.store.Settings.CalEnabled {
+		m.calLoading = true
+		cmds = append(cmds, fetchCalEventsCmd(m.store.Settings.CalCacheMins))
+	}
+	return tea.Batch(cmds...)
 }
 
 // ── Update ─────────────────────────────────────────────────────────────────
@@ -84,6 +123,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.checkAlarms()
+		m.checkDailyResetForCal()
 		writeStatusFile(m.store, m.alarm)
 		return m, tea.Batch(tickCmd(), pollMacAlert())
 
@@ -91,9 +131,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleMacDialogResult(string(msg))
 		return m, pollMacAlert()
 
+	case calEventsMsg:
+		m.calLoading = false
+		if msg.err != nil {
+			m.calError = msg.err.Error()
+		} else {
+			m.calEvents = msg.events
+			m.calSelected = make([]bool, len(msg.events))
+			m.calError = ""
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.confirmDel {
 			return m.handleConfirmDel(msg)
+		}
+		if m.calSuggestMode {
+			return m.handleCalSuggestions(msg)
+		}
+		if m.feedsMode {
+			return m.handleFeeds(msg)
 		}
 		if m.settingsMode {
 			return m.handleSettings(msg)
@@ -206,6 +263,22 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		if m.habitView {
 			m.habitFull = !m.habitFull
+		} else {
+			m.feedsMode = true
+			m.feedsCursor = 0
+			m.feedsList, _ = loadFeeds()
+		}
+	case "p":
+		if m.store.Settings.CalEnabled {
+			m.calSuggestMode = true
+			m.calCursor = 0
+			m.calTimelineMode = false
+			if len(m.calEvents) == 0 {
+				m.calLoading = true
+				return m, fetchCalEventsCmd(m.store.Settings.CalCacheMins)
+			}
+		} else {
+			m.setMsg("Calendar disabled — enable in settings (o) and add feeds")
 		}
 	case "o":
 		m.settingsMode = true
@@ -317,7 +390,25 @@ func (m model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		default:
 			if len(key) == 1 {
-				m.inputTime += key
+				// quick-fill from calendar events
+				if key >= "a" && key <= "i" && len(m.calEvents) > 0 && m.inputTime == "" {
+					idx := int(key[0] - 'a')
+					count := 0
+					for _, ev := range m.calEvents {
+						if ev.AllDay {
+							continue
+						}
+						if count == idx {
+							m.inputTime = ev.StartTime
+							m.inputDesc = ev.Summary
+							m.inputField = fieldRecurrence
+							break
+						}
+						count++
+					}
+				} else {
+					m.inputTime += key
+				}
 			}
 		}
 
@@ -470,6 +561,280 @@ func (m *model) setMsg(s string) {
 	m.msgExpiry = time.Now().Add(3 * time.Second)
 }
 
+// checkDailyResetForCal auto-shows calendar suggestions after daily reset
+func (m *model) checkDailyResetForCal() {
+	today := time.Now().Format("2006-01-02")
+	if m.store.LastReset != today {
+		m.store.resetDaily()
+		if m.store.Settings.CalEnabled && !m.calLoading {
+			m.calEvents = nil
+			m.calLoading = true
+		}
+	}
+}
+
+func (m model) handleCalSuggestions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.calSuggestMode = false
+		m.calTimelineMode = false
+	case "j", "down":
+		if m.calCursor < len(m.calEvents)-1 {
+			m.calCursor++
+		}
+	case "k", "up":
+		if m.calCursor > 0 {
+			m.calCursor--
+		}
+	case " ":
+		if m.calCursor >= 0 && m.calCursor < len(m.calSelected) {
+			m.calSelected[m.calCursor] = !m.calSelected[m.calCursor]
+		}
+	case "a":
+		allOn := true
+		for _, s := range m.calSelected {
+			if !s {
+				allOn = false
+				break
+			}
+		}
+		for i := range m.calSelected {
+			m.calSelected[i] = !allOn
+		}
+	case "enter":
+		var selected []CalendarEvent
+		for i, ev := range m.calEvents {
+			if m.calSelected[i] {
+				selected = append(selected, ev)
+			}
+		}
+		if len(selected) > 0 {
+			imported := m.store.importCalendarEvents(selected)
+			m.setMsg(fmt.Sprintf("Imported %d event(s)", len(imported)))
+		}
+		m.calSuggestMode = false
+		m.calTimelineMode = false
+	case "r":
+		m.calLoading = true
+		m.calEvents = nil
+		m.calSuggestMode = false
+		return m, fetchCalEventsCmd(0) // bypass cache
+	case "t":
+		m.calTimelineMode = !m.calTimelineMode
+	case "f":
+		m.feedsMode = true
+		m.feedsCursor = 0
+		m.feedsList, _ = loadFeeds()
+		m.calSuggestMode = false
+	}
+	return m, nil
+}
+
+func (m *model) reloadFeeds() {
+	m.feedsList, _ = loadFeeds()
+	if m.feedsCursor >= len(m.feedsList) {
+		m.feedsCursor = max(0, len(m.feedsList)-1)
+	}
+}
+
+func (m model) handleFeeds(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	// delete confirmation sub-mode
+	if m.feedsConfirmDel {
+		if key == "y" && m.feedsCursor >= 0 && m.feedsCursor < len(m.feedsList) {
+			feed := m.feedsList[m.feedsCursor]
+			_ = removeFeed(feed.URL)
+			m.reloadFeeds()
+			m.feedsMsg = "Removed: " + feed.Label
+		}
+		m.feedsConfirmDel = false
+		return m, nil
+	}
+
+	// add-label sub-mode
+	if m.feedsAddLabel {
+		if tea.Key(msg).Paste {
+			m.feedsInputLabel += string(msg.Runes)
+			return m, nil
+		}
+		switch key {
+		case "enter":
+			feedURL := m.feedsInputURL
+			// Resolve file paths to absolute
+			if !strings.HasPrefix(feedURL, "http://") && !strings.HasPrefix(feedURL, "https://") {
+				abs, err := filepath.Abs(strings.TrimPrefix(feedURL, "file://"))
+				if err == nil {
+					feedURL = abs
+				}
+			}
+			err := addFeed(feedURL, m.feedsInputLabel)
+			if err != nil {
+				m.feedsMsg = "Error: " + err.Error()
+			} else {
+				m.feedsMsg = "Added feed"
+			}
+			m.reloadFeeds()
+			m.feedsAddLabel = false
+		case "esc":
+			m.feedsAddLabel = false
+		case "backspace", "ctrl+h":
+			if len(m.feedsInputLabel) > 0 {
+				m.feedsInputLabel = m.feedsInputLabel[:len(m.feedsInputLabel)-1]
+			}
+		default:
+			if len(key) == 1 && key[0] >= 32 {
+				m.feedsInputLabel += key
+			}
+		}
+		return m, nil
+	}
+
+	// add-URL sub-mode
+	if m.feedsAddURL {
+		if tea.Key(msg).Paste {
+			m.feedsInputURL += string(msg.Runes)
+			return m, nil
+		}
+		switch key {
+		case "enter":
+			isHTTP := strings.HasPrefix(m.feedsInputURL, "http://") || strings.HasPrefix(m.feedsInputURL, "https://")
+			isFile := !isHTTP && len(m.feedsInputURL) > 0
+			if isHTTP || isFile {
+				m.feedsAddURL = false
+				m.feedsAddLabel = true
+				m.feedsInputLabel = ""
+			} else {
+				m.feedsMsg = "Enter a URL or file path"
+			}
+		case "esc":
+			m.feedsAddURL = false
+		case "backspace", "ctrl+h":
+			if len(m.feedsInputURL) > 0 {
+				m.feedsInputURL = m.feedsInputURL[:len(m.feedsInputURL)-1]
+			}
+		default:
+			if len(key) == 1 && key[0] >= 32 {
+				m.feedsInputURL += key
+			}
+		}
+		return m, nil
+	}
+
+	// list mode
+	switch key {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.feedsMode = false
+	case "j", "down":
+		if m.feedsCursor < len(m.feedsList)-1 {
+			m.feedsCursor++
+		}
+	case "k", "up":
+		if m.feedsCursor > 0 {
+			m.feedsCursor--
+		}
+	case "a":
+		m.feedsAddURL = true
+		m.feedsInputURL = ""
+		m.feedsInputLabel = ""
+		m.feedsMsg = ""
+	case "d", "x":
+		if len(m.feedsList) > 0 {
+			m.feedsConfirmDel = true
+		}
+	}
+	return m, nil
+}
+
+func (m model) renderFeeds() string {
+	var inner strings.Builder
+	inner.WriteString(inputLabelStyle.Render("  Calendar Feeds"))
+	inner.WriteString("\n\n")
+
+	if len(m.feedsList) == 0 && !m.feedsAddURL && !m.feedsAddLabel {
+		inner.WriteString(dimStyle.Render("  No feeds — press 'a' to add one"))
+		inner.WriteString("\n")
+	} else {
+		for i, f := range m.feedsList {
+			label := f.Label
+			if label == "" {
+				label = "(no label)"
+			}
+			url := f.URL
+			maxURL := 40
+			if len(url) > maxURL {
+				url = url[:maxURL-3] + "..."
+			}
+			line := fmt.Sprintf("  %-14s %s", label, url)
+			if i == m.feedsCursor {
+				inner.WriteString(inputActiveStyle.Render("  ▸ " + line[2:]))
+			} else {
+				inner.WriteString(normalStyle.Render("    " + line[2:]))
+			}
+			inner.WriteString("\n")
+		}
+	}
+
+	if m.feedsAddURL {
+		inner.WriteString("\n")
+		inner.WriteString(inputActiveStyle.Render("  URL or path: " + m.feedsInputURL + "█"))
+		inner.WriteString("\n")
+	}
+
+	if m.feedsAddLabel {
+		inner.WriteString("\n")
+		inner.WriteString(inputActiveStyle.Render("  Label (optional): " + m.feedsInputLabel + "█"))
+		inner.WriteString("\n")
+	}
+
+	if m.feedsConfirmDel && m.feedsCursor >= 0 && m.feedsCursor < len(m.feedsList) {
+		feed := m.feedsList[m.feedsCursor]
+		label := feed.Label
+		if label == "" {
+			label = feed.URL
+		}
+		inner.WriteString("\n")
+		inner.WriteString(urgentStyle.Render(fmt.Sprintf("  Delete %q? (y/n)", label)))
+		inner.WriteString("\n")
+	}
+
+	if m.feedsMsg != "" {
+		inner.WriteString("\n")
+		inner.WriteString(dimStyle.Render("  " + m.feedsMsg))
+		inner.WriteString("\n")
+	}
+
+	inner.WriteString("\n")
+	inner.WriteString(dimStyle.Render("  a:add  d:remove  esc:back"))
+	inner.WriteString("\n")
+
+	boxWidth := m.width - 4
+	if boxWidth < 60 {
+		boxWidth = 60
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("14")).
+		Padding(1, 2).
+		Width(boxWidth)
+
+	return box.Render(inner.String()) + "\n"
+}
+
+func (m model) isEventImported(ev CalendarEvent) bool {
+	for _, t := range m.store.Tasks {
+		if t.Time == ev.StartTime && t.Desc == ev.Summary && hasTag(t.Tags, "gcal") {
+			return true
+		}
+	}
+	return false
+}
+
 // ── View ───────────────────────────────────────────────────────────────────
 
 var (
@@ -612,20 +977,39 @@ func (m model) View() string {
 	} else if m.habitView {
 		b.WriteString(m.renderHabits(w, h))
 	} else {
-		// responsive column widths
-		descWidth := w - 68 // time(8) + seps(12) + repeat(10) + status(13) + habits(22) + padding(3)
+		// responsive column widths — compute dynamic STATUS width
+		statusWidth := 11 // minimum ("overdue ..." baseline)
+		for _, t := range m.store.Tasks {
+			var s string
+			if t.Done {
+				s = "done"
+			} else if t.Dismissed {
+				s = "dismissed"
+			} else if !shouldFireToday(t) {
+				s = nextOccurrenceLabel(t)
+			} else if d := timeUntil(t); d < 0 {
+				s = "overdue " + fmtDuration(d)
+			} else {
+				s = fmtDuration(timeUntil(t))
+			}
+			if len(s) > statusWidth {
+				statusWidth = len(s)
+			}
+		}
+		fixedWidth := 8 + 12 + 10 + (statusWidth + 2) + 22 + 3 // time + seps + repeat + status + habits + pad
+		descWidth := w - fixedWidth
 		if descWidth < 20 {
 			descWidth = 20
 		}
 
 		// header with lipgloss border style — STATUS before dots
-		hdr := fmt.Sprintf("  %-7s │ %-*s │ %-8s │ %-11s │ %s",
-			"TIME", descWidth, "TASK", "REPEAT", "STATUS", "Mo Tu We Th Fr Sa Su")
+		hdr := fmt.Sprintf("  %-7s │ %-*s │ %-8s │ %-*s │ %s",
+			"TIME", descWidth, "TASK", "REPEAT", statusWidth, "STATUS", "Mo Tu We Th Fr Sa Su")
 		sep := fmt.Sprintf("  %s┼%s┼%s┼%s┼%s",
 			strings.Repeat("─", 8),
 			strings.Repeat("─", descWidth+2),
 			strings.Repeat("─", 10),
-			strings.Repeat("─", 13),
+			strings.Repeat("─", statusWidth+2),
 			strings.Repeat("─", 22))
 		b.WriteString(dimStyle.Render(hdr))
 		b.WriteString("\n")
@@ -680,6 +1064,9 @@ func (m model) View() string {
 				icon = "–"
 				status = "dismissed"
 				style = dimStyle
+			} else if !shouldFireToday(t) {
+				status = nextOccurrenceLabel(t)
+				style = dimStyle
 			} else {
 				d := timeUntil(t)
 				if d < 0 {
@@ -719,6 +1106,8 @@ func (m model) View() string {
 						dots += "  "
 					} else if today && t.Dismissed {
 						dots += habitDismissStyle.Render("··")
+					} else if !shouldFireOnDay(t, day.Weekday()) {
+						dots += "  "
 					} else {
 						dots += habitMissStyle.Render("··")
 					}
@@ -728,8 +1117,8 @@ func (m model) View() string {
 			}
 
 			// Main line: only plain text — safe to wrap in style.Render()
-			mainLine := fmt.Sprintf("  %5s   │ %s %-*s │ %-8s │ %-11s │ ",
-				t.Time, icon, maxDesc, desc, rec, status)
+			mainLine := fmt.Sprintf("  %5s   │ %s %-*s │ %-8s │ %-*s │ ",
+				t.Time, icon, maxDesc, desc, rec, statusWidth, status)
 
 			if i == m.cursor {
 				b.WriteString(cursorStyle.Render(mainLine))
@@ -751,6 +1140,14 @@ func (m model) View() string {
 		b.WriteString("\n")
 	}
 
+	if m.calSuggestMode {
+		b.WriteString(m.renderCalSuggestions())
+	}
+
+	if m.feedsMode {
+		b.WriteString(m.renderFeeds())
+	}
+
 	if m.inputMode {
 		b.WriteString(m.renderInput())
 	}
@@ -766,9 +1163,14 @@ func (m model) View() string {
 		b.WriteString("\n")
 	}
 
-	if !m.inputMode && !m.confirmDel {
+	if !m.inputMode && !m.confirmDel && !m.calSuggestMode {
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  a:add  e:edit  d:del  c:done  h:habits  o:settings  r:reload  j/k:nav  q:quit"))
+		helpKeys := "  a:add  e:edit  d:del  c:done  h:habits  f:feeds"
+		if m.store.Settings.CalEnabled {
+			helpKeys += "  p:calendar"
+		}
+		helpKeys += "  o:settings  r:reload  j/k:nav  q:quit"
+		b.WriteString(dimStyle.Render(helpKeys))
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render(fmt.Sprintf("  sock: %s  file: %s", sockPath(), statusPath())))
 	}
@@ -792,6 +1194,24 @@ func (m model) renderInput() string {
 		inner.WriteString(inputLabelStyle.Render(label + m.inputTime))
 	}
 	inner.WriteString("\n")
+
+	// calendar hints when on time field
+	if m.inputField == fieldTime && len(m.calEvents) > 0 {
+		inner.WriteString("\n")
+		inner.WriteString(dimStyle.Render("  Calendar:"))
+		inner.WriteString("\n")
+		count := 0
+		for _, ev := range m.calEvents {
+			if ev.AllDay || count >= 9 {
+				break
+			}
+			count++
+			inner.WriteString(dimStyle.Render(fmt.Sprintf("    %c) %s  %s", 'a'+count-1, ev.StartTime, ev.Summary)))
+			inner.WriteString("\n")
+		}
+		inner.WriteString(dimStyle.Render("  (a-i to quick-fill, or type manually)"))
+		inner.WriteString("\n")
+	}
 
 	label = "  Description:  "
 	if m.inputField == fieldDesc {
@@ -880,7 +1300,7 @@ func (m model) renderInput() string {
 	return box.Render(inner.String()) + "\n"
 }
 
-var settingsLabels = [7]string{
+var settingsLabels = [10]string{
 	"Snooze duration",
 	"Notification",
 	"Modal dialog",
@@ -888,6 +1308,9 @@ var settingsLabels = [7]string{
 	"System sound",
 	"Terminal bell",
 	"Tmux flash",
+	"─── Calendar ───",
+	"Calendar feeds",
+	"Cache duration (min)",
 }
 
 func (m model) handleSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -899,22 +1322,45 @@ func (m model) handleSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.store.save()
 		m.setMsg("Settings saved")
 	case "j", "down":
-		if m.settingsCursor < 6 {
+		if m.settingsCursor < 9 {
 			m.settingsCursor++
+			// skip separator row
+			if m.settingsCursor == 7 {
+				m.settingsCursor = 8
+			}
 		}
 	case "k", "up":
 		if m.settingsCursor > 0 {
 			m.settingsCursor--
+			// skip separator row
+			if m.settingsCursor == 7 {
+				m.settingsCursor = 6
+			}
 		}
-	case " ", "enter":
+	case "enter":
+		if m.settingsCursor == 8 {
+			m.feedsMode = true
+			m.feedsCursor = 0
+			m.feedsList, _ = loadFeeds()
+			m.settingsMode = false
+		} else {
+			m.toggleSettingBool()
+		}
+	case " ":
 		m.toggleSettingBool()
 	case "h", "left":
 		if m.settingsCursor == 0 && m.store.Settings.SnoozeMins > 1 {
 			m.store.Settings.SnoozeMins--
 		}
+		if m.settingsCursor == 9 && m.store.Settings.CalCacheMins > 1 {
+			m.store.Settings.CalCacheMins--
+		}
 	case "l", "right":
 		if m.settingsCursor == 0 && m.store.Settings.SnoozeMins < 60 {
 			m.store.Settings.SnoozeMins++
+		}
+		if m.settingsCursor == 9 && m.store.Settings.CalCacheMins < 120 {
+			m.store.Settings.CalCacheMins++
 		}
 	}
 	return m, nil
@@ -935,6 +1381,8 @@ func (m *model) toggleSettingBool() {
 		s.AlertBell = !s.AlertBell
 	case 6:
 		s.AlertTmux = !s.AlertTmux
+	case 8:
+		s.CalEnabled = !s.CalEnabled
 	}
 }
 
@@ -944,19 +1392,45 @@ func (m model) renderSettings(w int) string {
 	inner.WriteString("\n\n")
 
 	s := &m.store.Settings
-	bools := [7]bool{false, s.AlertNotify, s.AlertDialog, s.AlertSpeech, s.AlertSound, s.AlertBell, s.AlertTmux}
 
 	for i, label := range settingsLabels {
-		var val string
-		if i == 0 {
-			val = fmt.Sprintf("%d min    [◄ ►]", s.SnoozeMins)
-		} else if bools[i] {
-			val = habitDoneStyle.Render("✓ ON")
-		} else {
-			val = dimStyle.Render("✗ OFF")
+		// separator row
+		if i == 7 {
+			inner.WriteString("\n")
+			inner.WriteString(dimStyle.Render("  " + label))
+			inner.WriteString("\n")
+			continue
 		}
 
-		line := fmt.Sprintf("  %-20s %s", label, val)
+		var val string
+		switch i {
+		case 0:
+			val = fmt.Sprintf("%d min    [◄ ►]", s.SnoozeMins)
+		case 1:
+			val = boolVal(s.AlertNotify)
+		case 2:
+			val = boolVal(s.AlertDialog)
+		case 3:
+			val = boolVal(s.AlertSpeech)
+		case 4:
+			val = boolVal(s.AlertSound)
+		case 5:
+			val = boolVal(s.AlertBell)
+		case 6:
+			val = boolVal(s.AlertTmux)
+		case 8:
+			val = boolVal(s.CalEnabled)
+			feeds, _ := loadFeeds()
+			if len(feeds) == 0 {
+				val += dimStyle.Render("  (no feeds — press enter to manage)")
+			} else {
+				val += dimStyle.Render(fmt.Sprintf("  (%d feed(s))", len(feeds)))
+			}
+		case 9:
+			val = fmt.Sprintf("%d min    [◄ ►]", s.CalCacheMins)
+		}
+
+		line := fmt.Sprintf("  %-22s %s", label, val)
 		if i == m.settingsCursor {
 			inner.WriteString(inputActiveStyle.Render(line))
 		} else {
@@ -966,7 +1440,7 @@ func (m model) renderSettings(w int) string {
 	}
 
 	inner.WriteString("\n")
-	inner.WriteString(dimStyle.Render("  j/k:navigate  space:toggle  ◄►:adjust snooze  esc:back"))
+	inner.WriteString(dimStyle.Render("  j/k:navigate  space:toggle  ◄►:adjust  esc:back"))
 	inner.WriteString("\n")
 
 	boxWidth := w - 4
@@ -983,6 +1457,13 @@ func (m model) renderSettings(w int) string {
 	return box.Render(inner.String()) + "\n"
 }
 
+func boolVal(b bool) string {
+	if b {
+		return habitDoneStyle.Render("ON")
+	}
+	return dimStyle.Render("OFF")
+}
+
 func weekStart(t time.Time) time.Time {
 	wd := t.Weekday()
 	if wd == time.Sunday {
@@ -990,6 +1471,260 @@ func weekStart(t time.Time) time.Time {
 	}
 	d := t.AddDate(0, 0, -int(wd-time.Monday))
 	return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, t.Location())
+}
+
+var calBoxStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("14"))
+
+func (m model) renderCalSuggestions() string {
+	if m.calTimelineMode {
+		return m.renderTimeline()
+	}
+
+	var inner strings.Builder
+	now := time.Now()
+	inner.WriteString(calBoxStyle.Render("  Calendar — " + now.Format("Monday, January 2")))
+	inner.WriteString("\n\n")
+
+	if m.calLoading {
+		inner.WriteString(dimStyle.Render("  Loading calendar events..."))
+		inner.WriteString("\n")
+	} else if m.calError != "" {
+		inner.WriteString(urgentStyle.Render("  Error: " + m.calError))
+		inner.WriteString("\n")
+	} else if len(m.calEvents) == 0 {
+		inner.WriteString(dimStyle.Render("  No events today"))
+		inner.WriteString("\n")
+	} else {
+		// timed events
+		hasAllDay := false
+		for i, ev := range m.calEvents {
+			if ev.AllDay {
+				hasAllDay = true
+				continue
+			}
+			check := "[ ]"
+			if m.calSelected[i] {
+				check = "[x]"
+			}
+			imported := m.isEventImported(ev)
+
+			line := fmt.Sprintf("  %s %s─%s  %s", check, ev.StartTime, ev.EndTime, ev.Summary)
+			if imported {
+				line += "  imported"
+			}
+
+			if i == m.calCursor {
+				inner.WriteString(inputActiveStyle.Render(line))
+			} else if imported {
+				inner.WriteString(dimStyle.Render(line))
+			} else {
+				inner.WriteString(normalStyle.Render(line))
+			}
+			inner.WriteString("\n")
+		}
+
+		// all-day section
+		if hasAllDay {
+			inner.WriteString("\n")
+			inner.WriteString(dimStyle.Render("  ── All-day ──"))
+			inner.WriteString("\n")
+			for i, ev := range m.calEvents {
+				if !ev.AllDay {
+					continue
+				}
+				check := "[ ]"
+				if m.calSelected[i] {
+					check = "[x]"
+				}
+				line := fmt.Sprintf("  %s %s", check, ev.Summary)
+				if i == m.calCursor {
+					inner.WriteString(inputActiveStyle.Render(line))
+				} else {
+					inner.WriteString(normalStyle.Render(line))
+				}
+				inner.WriteString("\n")
+			}
+		}
+	}
+
+	inner.WriteString("\n")
+	inner.WriteString(dimStyle.Render("  SPACE:toggle  ENTER:import selected  a:all  r:refresh"))
+	inner.WriteString("\n")
+	inner.WriteString(dimStyle.Render("  t:timeline  f:feeds  esc:dismiss"))
+	inner.WriteString("\n")
+
+	boxWidth := m.width - 4
+	if boxWidth < 60 {
+		boxWidth = 60
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("14")).
+		Padding(1, 2).
+		Width(boxWidth)
+
+	return box.Render(inner.String()) + "\n"
+}
+
+func (m model) renderTimeline() string {
+	var inner strings.Builder
+	now := time.Now()
+	inner.WriteString(calBoxStyle.Render("  Timeline — " + now.Format("Monday, January 2")))
+	inner.WriteString("\n\n")
+
+	// find hour range from events and tasks
+	minHour := 23
+	maxHour := 0
+
+	for _, ev := range m.calEvents {
+		if ev.AllDay {
+			continue
+		}
+		if h := parseHour(ev.StartTime); h < minHour {
+			minHour = h
+		}
+		if h := parseHour(ev.EndTime); h > maxHour {
+			maxHour = h
+		}
+	}
+	for _, t := range m.store.Tasks {
+		if !shouldFireToday(t) {
+			continue
+		}
+		if h := parseHour(t.Time); h >= 0 {
+			if h < minHour {
+				minHour = h
+			}
+			if h > maxHour {
+				maxHour = h
+			}
+		}
+	}
+
+	if minHour > maxHour {
+		minHour = 8
+		maxHour = 18
+	}
+	maxHour++ // include the last hour
+
+	// all-day banner
+	for _, ev := range m.calEvents {
+		if ev.AllDay {
+			inner.WriteString(inputLabelStyle.Render(fmt.Sprintf("  ALL DAY: %s", ev.Summary)))
+			inner.WriteString("\n")
+		}
+	}
+
+	// build timeline
+	for hour := minHour; hour <= maxHour; hour++ {
+		hourStr := fmt.Sprintf("%02d", hour)
+
+		// find calendar event for this hour
+		var evLabel string
+		hasEvent := false
+		for _, ev := range m.calEvents {
+			if ev.AllDay {
+				continue
+			}
+			sh := parseHour(ev.StartTime)
+			eh := parseHour(ev.EndTime)
+			if hour >= sh && hour < eh {
+				hasEvent = true
+				if hour == sh {
+					evLabel = ev.Summary
+				}
+			}
+		}
+
+		// find task for this hour
+		var taskLabel string
+		for _, t := range m.store.Tasks {
+			if !shouldFireToday(t) {
+				continue
+			}
+			if parseHour(t.Time) == hour {
+				prefix := ""
+				if t.Done {
+					prefix = "done "
+				}
+				taskLabel = prefix + t.Desc
+				break
+			}
+		}
+
+		// render row
+		leftCol := "·"
+		if hasEvent {
+			leftCol = inputLabelStyle.Render("████")
+		}
+
+		evText := ""
+		if evLabel != "" {
+			evText = " " + evLabel
+		}
+
+		taskText := ""
+		if taskLabel != "" {
+			taskText = habitDoneStyle.Render("  " + taskLabel)
+		}
+
+		line := fmt.Sprintf("  %s  %s%s", hourStr, leftCol, evText)
+		if hasEvent {
+			inner.WriteString(normalStyle.Render(fmt.Sprintf("  %s  ", hourStr)))
+			inner.WriteString(inputLabelStyle.Render("████"))
+			if evText != "" {
+				inner.WriteString(normalStyle.Render(evText))
+			}
+		} else {
+			inner.WriteString(dimStyle.Render(line))
+		}
+		if taskText != "" {
+			// pad to align task column
+			padding := 45 - len(line)
+			if padding < 2 {
+				padding = 2
+			}
+			inner.WriteString(strings.Repeat(" ", padding))
+			inner.WriteString(taskText)
+		}
+		inner.WriteString("\n")
+	}
+
+	inner.WriteString("\n")
+	inner.WriteString(dimStyle.Render("  Left: calendar events  Right: your tasks"))
+	inner.WriteString("\n")
+	inner.WriteString(dimStyle.Render("  t:list view  esc:back"))
+	inner.WriteString("\n")
+
+	boxWidth := m.width - 4
+	if boxWidth < 60 {
+		boxWidth = 60
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("14")).
+		Padding(1, 2).
+		Width(boxWidth)
+
+	return box.Render(inner.String()) + "\n"
+}
+
+func parseHour(timeStr string) int {
+	if len(timeStr) >= 2 {
+		h := 0
+		for _, c := range timeStr[:2] {
+			if c >= '0' && c <= '9' {
+				h = h*10 + int(c-'0')
+			} else {
+				return -1
+			}
+		}
+		return h
+	}
+	return -1
 }
 
 func (m model) renderHabits(w, _ int) string {
@@ -1092,6 +1827,8 @@ func (m model) renderHabits(w, _ int) string {
 				row += "  " + habitDoneStyle.Render("██") + " "
 			} else if isToday && t.Dismissed {
 				row += "  " + habitDismissStyle.Render("··") + " "
+			} else if !shouldFireOnDay(t, d.Weekday()) {
+				row += "     "
 			} else {
 				row += "  " + habitMissStyle.Render("··") + " "
 			}

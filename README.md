@@ -15,6 +15,7 @@ Terminal daily planner that breaks your flow — with alerts, habit tracking, an
 - **Recurrence** — once, daily, weekdays, weekly, monthly, custom day picker
 - **Tags** — comma-separated, displayed inline
 - **Snooze** — configurable duration (1–60 min), per-task snooze state
+- **Calendar integration** — subscribe to iCal feeds (HTTP or local `.ics` files), view today's events in a timeline, import events as one-off tasks
 - **Claude Code integration** — `flow-breaker nudge` returns a one-liner suitable for LLM context
 
 ## Install
@@ -54,6 +55,11 @@ flow-breaker add 14:00 "Call plumber" --repeat once
 | `flow-breaker clear` | Delete all tasks |
 | `flow-breaker status` | Print JSON status report |
 | `flow-breaker nudge` | One-liner for scripts / Claude Code |
+| `flow-breaker cal-add <url\|path> [--label "X"]` | Add an iCal feed (HTTP URL or local `.ics` file) |
+| `flow-breaker cal-remove <url\|label>` | Remove a feed by URL or label substring |
+| `flow-breaker cal-feeds` | List configured feeds |
+| `flow-breaker cal-list` | Show today's calendar events |
+| `flow-breaker claude-install` | Install Claude Code hook + instructions |
 | `flow-breaker help` | Print usage |
 
 ### `add` flags
@@ -74,6 +80,8 @@ flow-breaker add 14:00 "Call plumber" --repeat once
 | `d` / `x` | Delete selected task (confirms with y/n) |
 | `c` | Toggle done |
 | `h` | Toggle habit tracker view |
+| `p` | Calendar events (import / timeline) |
+| `f` | Manage calendar feeds |
 | `o` | Open settings |
 | `r` | Reload tasks from disk |
 | `j` / `down` | Move cursor down |
@@ -116,6 +124,32 @@ Fields are filled in sequence: Time -> Description -> Recurrence -> Days (if app
 | `esc` / `o` | Save and close settings |
 | `q` | Quit |
 
+### Calendar mode
+
+Press `p` to open the calendar event picker (requires calendar to be enabled with at least one feed).
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate events |
+| `space` | Toggle event selection |
+| `a` | Select all |
+| `enter` | Import selected events as tasks (tagged `gcal`) |
+| `t` | Toggle timeline view |
+| `r` | Refresh events (bypasses cache) |
+| `f` | Switch to feed management |
+| `esc` | Close |
+
+### Feed management mode
+
+Press `f` to manage iCal feeds.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate feeds |
+| `a` | Add a new feed (enter URL, then label) |
+| `d` | Delete selected feed (confirms with y/n) |
+| `esc` | Close |
+
 ## Habit tracker
 
 Press `h` in the TUI to toggle the habit tracker view. It shows recurring tasks only with a dot grid:
@@ -148,6 +182,29 @@ While an alarm is active the TUI also plays a "Ping" sound every ~5 seconds.
 
 The modal dialog is non-blocking — its result (Snooze/Done/Dismiss) is captured asynchronously and applied to the TUI state.
 
+## Calendar integration
+
+Subscribe to iCal feeds to see today's events alongside your tasks. Supports HTTP URLs (Google Calendar, Outlook, etc.) and local `.ics` files.
+
+```bash
+# Add a remote iCal feed
+flow-breaker cal-add "https://calendar.google.com/calendar/ical/.../basic.ics" --label "Work"
+
+# Add a local .ics file
+flow-breaker cal-add ~/calendars/personal.ics --label "Personal"
+
+# View today's events
+flow-breaker cal-list
+
+# Manage feeds
+flow-breaker cal-feeds
+flow-breaker cal-remove "Work"
+```
+
+In the TUI, press `p` to view today's events, toggle a timeline, and selectively import events as tasks. Imported events are tagged `gcal` and deduplicated on subsequent imports.
+
+Events are cached locally (default 15 minutes, configurable in settings). Press `r` in the calendar view to force a refresh.
+
 ## Integration
 
 ### Unix socket
@@ -160,6 +217,7 @@ echo "nudge"  | nc -U ~/.flow-breaker/flow.sock
 echo "next"   | nc -U ~/.flow-breaker/flow.sock
 echo "overdue"| nc -U ~/.flow-breaker/flow.sock
 echo "alarm"  | nc -U ~/.flow-breaker/flow.sock
+echo "calendar"| nc -U ~/.flow-breaker/flow.sock
 ```
 
 | Command | Response |
@@ -169,6 +227,7 @@ echo "alarm"  | nc -U ~/.flow-breaker/flow.sock
 | `next` | JSON of next upcoming task |
 | `overdue` | JSON array of overdue tasks |
 | `alarm` | JSON of alarm task, or `false` if no alarm |
+| `calendar` | JSON array of today's calendar events (requires calendar enabled) |
 
 ### Status file
 
@@ -185,6 +244,15 @@ echo "alarm"  | nc -U ~/.flow-breaker/flow.sock
   "nudge": "Next: 11:00 Stand-up (29m 45s away)"
 }
 ```
+
+### Claude Code setup
+
+```bash
+# One-command install — adds SessionStart hook + instructions to ~/.claude/
+flow-breaker claude-install
+```
+
+This adds a `SessionStart` hook so Claude Code runs `flow-breaker nudge` at the start of every conversation, and appends instructions to `~/.claude/CLAUDE.md` telling Claude to surface alerts. Safe to run multiple times (idempotent).
 
 ### Claude Code usage
 
@@ -224,6 +292,8 @@ export FLOW_BREAKER_DIR=~/my-planner
 | `tasks.json` | All tasks, settings, reset state |
 | `status.json` | Live status (written by TUI every 500ms) |
 | `flow.sock` | Unix socket (created by TUI, cleaned up on exit) |
+| `calendar_feeds.json` | Configured iCal feed URLs and labels |
+| `calendar_cache.json` | Cached calendar events for today |
 
 ### Settings
 
@@ -238,6 +308,8 @@ Settings are stored inside `tasks.json` and edited via the TUI settings screen (
 | System sound | on | on/off |
 | Terminal bell | on | on/off |
 | Tmux flash | on | on/off |
+| Calendar enabled | off | on/off |
+| Calendar cache | 15 min | minutes |
 
 ## Recurrence types
 

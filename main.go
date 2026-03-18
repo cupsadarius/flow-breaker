@@ -22,6 +22,16 @@ func main() {
 			cliStatus()
 		case "nudge":
 			cliNudge()
+		case "cal-add":
+			cliCalAdd(os.Args[2:])
+		case "cal-remove":
+			cliCalRemove(os.Args[2:])
+		case "cal-feeds":
+			cliCalFeeds()
+		case "cal-list":
+			cliCalList()
+		case "claude-install":
+			cliClaudeInstall()
 		case "help", "--help", "-h":
 			printUsage()
 		default:
