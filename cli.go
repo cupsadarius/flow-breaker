@@ -306,7 +306,9 @@ func patchSettings(path string) {
 		}
 	}
 
-	// Navigate to hooks.SessionStart, creating intermediates
+	changed := false
+
+	// ── SessionStart hook ──
 	hooks, ok := settings["hooks"].(map[string]interface{})
 	if !ok {
 		hooks = make(map[string]interface{})
@@ -318,7 +320,7 @@ func patchSettings(path string) {
 		sessionStart = []interface{}{}
 	}
 
-	// Check if hook already exists (idempotent)
+	hookExists := false
 	for _, entry := range sessionStart {
 		entryMap, ok := entry.(map[string]interface{})
 		if !ok {
@@ -335,24 +337,68 @@ func patchSettings(path string) {
 			}
 			cmd, _ := hMap["command"].(string)
 			if strings.Contains(cmd, "flow-breaker nudge") {
-				fmt.Println("✓ SessionStart hook already configured")
-				return
+				hookExists = true
+				break
 			}
+		}
+		if hookExists {
+			break
 		}
 	}
 
-	// Append new hook entry
-	newEntry := map[string]interface{}{
-		"matcher": "startup|resume",
-		"hooks": []interface{}{
-			map[string]interface{}{
-				"type":    "command",
-				"command": "flow-breaker nudge 2>/dev/null || true",
+	if hookExists {
+		fmt.Println("✓ SessionStart hook already configured")
+	} else {
+		newEntry := map[string]interface{}{
+			"matcher": "startup|resume",
+			"hooks": []interface{}{
+				map[string]interface{}{
+					"type":    "command",
+					"command": "flow-breaker nudge 2>/dev/null || true",
+				},
 			},
-		},
+		}
+		sessionStart = append(sessionStart, newEntry)
+		hooks["SessionStart"] = sessionStart
+		changed = true
+		fmt.Println("✓ added SessionStart hook to ~/.claude/settings.json")
 	}
-	sessionStart = append(sessionStart, newEntry)
-	hooks["SessionStart"] = sessionStart
+
+	// ── Bash permission for flow-breaker nudge ──
+	const nudgePerm = "Bash(flow-breaker nudge*)"
+
+	perms, ok := settings["permissions"].(map[string]interface{})
+	if !ok {
+		perms = make(map[string]interface{})
+		settings["permissions"] = perms
+	}
+
+	allowList, ok := perms["allow"].([]interface{})
+	if !ok {
+		allowList = []interface{}{}
+	}
+
+	permExists := false
+	for _, entry := range allowList {
+		if s, ok := entry.(string); ok && s == nudgePerm {
+			permExists = true
+			break
+		}
+	}
+
+	if permExists {
+		fmt.Println("✓ Bash permission already configured")
+	} else {
+		allowList = append(allowList, nudgePerm)
+		perms["allow"] = allowList
+		changed = true
+		fmt.Println("✓ added Bash permission for flow-breaker nudge")
+	}
+
+	// ── Write back if anything changed ──
+	if !changed {
+		return
+	}
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
@@ -365,7 +411,6 @@ func patchSettings(path string) {
 		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", path, err)
 		os.Exit(1)
 	}
-	fmt.Println("✓ added SessionStart hook to ~/.claude/settings.json")
 }
 
 func patchClaudeMD(path string) {
