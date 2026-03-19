@@ -32,6 +32,8 @@ func main() {
 			cliCalList()
 		case "claude-install":
 			cliClaudeInstall()
+		case "opencode-install":
+			cliOpencodeInstall()
 		case "help", "--help", "-h":
 			printUsage()
 		default:

@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -433,6 +434,8 @@ func patchClaudeMD(path string) {
 	section := `## flow-breaker
 
 At the start of every conversation, run ` + "`flow-breaker nudge`" + ` and surface any alerts or overdue tasks to the user before proceeding. If there are overdue tasks, mention them prominently.
+
+During long sessions, run ` + "`flow-breaker nudge`" + ` every 30 minutes to check for new overdue tasks. If the user asks you to monitor tasks, use ` + "`/loop 30m flow-breaker nudge`" + ` to automate this.
 `
 
 	// Ensure proper newline separation
@@ -449,6 +452,181 @@ At the start of every conversation, run ` + "`flow-breaker nudge`" + ` and surfa
 		os.Exit(1)
 	}
 	fmt.Println("✓ added flow-breaker section to ~/.claude/CLAUDE.md")
+}
+
+// ── OpenCode Integration ───────────────────────────────────────────────────
+
+func cliOpencodeInstall() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	opencodeDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(opencodeDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot create %s: %v\n", opencodeDir, err)
+		os.Exit(1)
+	}
+
+	configPath := filepath.Join(opencodeDir, "opencode.json")
+	pluginsDir := filepath.Join(opencodeDir, "plugins")
+	agentsMDPath := filepath.Join(opencodeDir, "AGENTS.md")
+
+	patchOpencodeConfig(configPath)
+	writeOpencodePlugin(pluginsDir)
+	patchAgentsMD(agentsMDPath)
+}
+
+// stripJSONC removes trailing commas before } and ] so that JSONC
+// files (as used by opencode) can be parsed with encoding/json.
+func stripJSONC(data []byte) []byte {
+	re := regexp.MustCompile(`,\s*([}\]])`)
+	return re.ReplaceAll(data, []byte("$1"))
+}
+
+func patchOpencodeConfig(path string) {
+	var config map[string]interface{}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "error: cannot read %s: %v\n", path, err)
+			os.Exit(1)
+		}
+		config = map[string]interface{}{
+			"$schema": "https://opencode.ai/config.json",
+		}
+	} else {
+		clean := stripJSONC(data)
+		if err := json.Unmarshal(clean, &config); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s is malformed JSON: %v\n", path, err)
+			os.Exit(1)
+		}
+	}
+
+	changed := false
+
+	// ── Bash permission for flow-breaker nudge ──
+	const nudgePattern = "flow-breaker nudge*"
+	const nudgeAllow = "allow"
+
+	perm, ok := config["permission"].(map[string]interface{})
+	if !ok {
+		perm = make(map[string]interface{})
+		config["permission"] = perm
+	}
+
+	bash, ok := perm["bash"].(map[string]interface{})
+	if !ok {
+		bash = make(map[string]interface{})
+		perm["bash"] = bash
+	}
+
+	if existing, ok := bash[nudgePattern].(string); ok && existing == nudgeAllow {
+		fmt.Println("✓ bash permission already configured")
+	} else {
+		bash[nudgePattern] = nudgeAllow
+		changed = true
+		fmt.Println("✓ added bash permission for flow-breaker nudge")
+	}
+
+	if !changed {
+		return
+	}
+
+	out, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot marshal config: %v\n", err)
+		os.Exit(1)
+	}
+	out = append(out, '\n')
+
+	if err := os.WriteFile(path, out, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", path, err)
+		os.Exit(1)
+	}
+}
+
+const opencodePluginJS = `export const FlowBreaker = async ({ $ }) => {
+  let cached = ""
+
+  const refresh = async () => {
+    try {
+      cached = await $` + "`flow-breaker nudge`" + `.quiet().nothrow().text()
+    } catch {
+      cached = ""
+    }
+  }
+  await refresh()
+  setInterval(refresh, 30 * 60 * 1000)
+
+  return {
+    "experimental.chat.system.transform": async (input, output) => {
+      if (cached.trim()) {
+        output.system.push("## flow-breaker alerts\n" + cached.trim())
+      }
+    },
+  }
+}
+`
+
+func writeOpencodePlugin(pluginsDir string) {
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot create %s: %v\n", pluginsDir, err)
+		os.Exit(1)
+	}
+
+	pluginPath := filepath.Join(pluginsDir, "flow-breaker.js")
+
+	if _, err := os.Stat(pluginPath); err == nil {
+		fmt.Println("✓ opencode plugin already installed")
+		return
+	}
+
+	if err := os.WriteFile(pluginPath, []byte(opencodePluginJS), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", pluginPath, err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ created opencode plugin at ~/.config/opencode/plugins/flow-breaker.js")
+}
+
+func patchAgentsMD(path string) {
+	content := ""
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "error: cannot read %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	if err == nil {
+		content = string(data)
+	}
+
+	if strings.Contains(content, "## flow-breaker") {
+		fmt.Println("✓ AGENTS.md already configured")
+		return
+	}
+
+	section := `## flow-breaker
+
+At the start of every conversation, run ` + "`flow-breaker nudge`" + ` and surface any alerts or overdue tasks to the user before proceeding. If there are overdue tasks, mention them prominently.
+
+During long sessions, run ` + "`flow-breaker nudge`" + ` every 30 minutes to check for new overdue tasks.
+`
+
+	if content != "" && !strings.HasSuffix(content, "\n\n") {
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += "\n"
+	}
+	content += section
+
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ added flow-breaker section to ~/.config/opencode/AGENTS.md")
 }
 
 func printUsage() {
@@ -470,7 +648,8 @@ CALENDAR:
   flow-breaker cal-list         show today's calendar events
 
 SETUP:
-  flow-breaker claude-install  install Claude Code hook + instructions
+  flow-breaker claude-install    install Claude Code hook + instructions
+  flow-breaker opencode-install  install opencode plugin + instructions
 
 INTEGRATION:
   Socket:  ~/.flow-breaker/flow.sock  (send: status|nudge|next|overdue|alarm|calendar)
