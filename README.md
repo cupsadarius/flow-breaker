@@ -16,7 +16,9 @@ Terminal daily planner that breaks your flow — with alerts, habit tracking, an
 - **Tags** — comma-separated, displayed inline
 - **Snooze** — configurable duration (1–60 min), per-task snooze state
 - **Calendar integration** — subscribe to iCal feeds (HTTP or local `.ics` files), view today's events in a timeline, import events as one-off tasks
+- **Overdue-on-startup** — launching the TUI immediately fires alerts for any overdue tasks
 - **Claude Code integration** — `flow-breaker nudge` returns a one-liner suitable for LLM context
+- **OpenCode integration** — plugin injects nudge into system prompts every 30 minutes
 
 ## Install
 
@@ -24,7 +26,7 @@ Terminal daily planner that breaks your flow — with alerts, habit tracking, an
 go install github.com/cupsadarius/flow-breaker@latest
 ```
 
-Or build from source:
+Or build from source (requires Go 1.25+):
 
 ```bash
 git clone https://github.com/cupsadarius/flow-breaker.git
@@ -60,13 +62,14 @@ flow-breaker add 14:00 "Call plumber" --repeat once
 | `flow-breaker cal-feeds` | List configured feeds |
 | `flow-breaker cal-list` | Show today's calendar events |
 | `flow-breaker claude-install` | Install Claude Code hook + instructions |
-| `flow-breaker help` | Print usage |
+| `flow-breaker opencode-install` | Install OpenCode plugin + instructions |
+| `flow-breaker help` / `--help` / `-h` | Print usage |
 
 ### `add` flags
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--repeat <type>` | `-r` | Recurrence: `once`, `daily`, `weekdays`, `weekly`, `monthly` | `daily` |
+| `--repeat <type>` | `-r` | Recurrence: `once`, `daily`, `weekdays`, `weekly`, `monthly`, `custom` | `daily` |
 | `--tags <a,b>` | `-t` | Comma-separated tags | none |
 
 ## TUI keybindings
@@ -81,7 +84,7 @@ flow-breaker add 14:00 "Call plumber" --repeat once
 | `c` | Toggle done |
 | `h` | Toggle habit tracker view |
 | `p` | Calendar events (import / timeline) |
-| `f` | Manage calendar feeds |
+| `f` | Manage calendar feeds (or toggle full history in habit view) |
 | `o` | Open settings |
 | `r` | Reload tasks from disk |
 | `j` / `down` | Move cursor down |
@@ -108,9 +111,11 @@ Fields are filled in sequence: Time -> Description -> Recurrence -> Days (if app
 |-----|--------|
 | `enter` | Advance to next field / confirm |
 | `esc` | Cancel |
-| `j` / `k` | Navigate recurrence options |
-| `h` / `l` | Navigate day picker |
+| `backspace` | Delete last character (time / description / tags fields) |
+| `j` / `k` / `tab` / `shift+tab` | Navigate recurrence options |
+| `h` / `l` / `tab` / `shift+tab` | Navigate day picker |
 | `space` | Toggle day on/off (day picker) / select recurrence |
+| `a`–`i` | Quick-fill time and description from calendar event (time field only, when calendar events are loaded) |
 | `y` / `enter` | Confirm at final step |
 | `n` | Cancel at final step |
 
@@ -120,7 +125,7 @@ Fields are filled in sequence: Time -> Description -> Recurrence -> Days (if app
 |-----|--------|
 | `j` / `k` | Navigate settings |
 | `space` / `enter` | Toggle alert on/off |
-| `h` / `l` (left/right) | Adjust snooze duration (1–60 min) |
+| `h` / `l` (left/right) | Adjust snooze duration (1–60 min) or calendar cache duration (1–120 min) |
 | `esc` / `o` | Save and close settings |
 | `q` | Quit |
 
@@ -137,6 +142,7 @@ Press `p` to open the calendar event picker (requires calendar to be enabled wit
 | `t` | Toggle timeline view |
 | `r` | Refresh events (bypasses cache) |
 | `f` | Switch to feed management |
+| `q` / `ctrl+c` | Quit |
 | `esc` | Close |
 
 ### Feed management mode
@@ -147,7 +153,8 @@ Press `f` to manage iCal feeds.
 |-----|--------|
 | `j` / `k` | Navigate feeds |
 | `a` | Add a new feed (enter URL, then label) |
-| `d` | Delete selected feed (confirms with y/n) |
+| `d` / `x` | Delete selected feed (confirms with y/n) |
+| `q` / `ctrl+c` | Quit |
 | `esc` | Close |
 
 ## Habit tracker
@@ -178,7 +185,7 @@ Six alert types fire independently when a task becomes due. Toggle each on/off i
 | **Terminal bell** | Prints `\a` (BEL character) | Any terminal |
 | **Tmux flash** | Displays message + flashes pane red for 3 seconds | tmux session |
 
-While an alarm is active the TUI also plays a "Ping" sound every ~5 seconds.
+While an alarm is active the TUI also plays a "Ping" sound and terminal bell (`\a`) every ~5 seconds.
 
 The modal dialog is non-blocking — its result (Snooze/Done/Dismiss) is captured asynchronously and applied to the TUI state.
 
@@ -237,13 +244,22 @@ echo "calendar"| nc -U ~/.flow-breaker/flow.sock
 {
   "timestamp": "2025-03-18T10:30:00Z",
   "alarm_firing": false,
-  "next": { "time": "11:00", "desc": "Stand-up", "time_until": "29m 45s", "seconds": 1785 },
+  "alarm_task": null,
+  "next": {
+    "id": 1, "time": "11:00", "desc": "Stand-up", "recurrence": "weekdays",
+    "done": false, "dismissed": false, "snoozed": 0, "tags": ["work"],
+    "created_at": "2025-03-17T08:00:00Z",
+    "time_until": "29m 45s", "seconds": 1785
+  },
   "overdue": [],
   "upcoming": [],
   "done": [],
-  "nudge": "Next: 11:00 Stand-up (29m 45s away)"
+  "nudge": "Next: 11:00 Stand-up (29m 45s away)",
+  "calendar_events": []
 }
 ```
+
+When an alarm is active, `alarm_task` contains the full task object. `calendar_events` is populated when calendar integration is enabled.
 
 ### Claude Code setup
 
@@ -252,7 +268,12 @@ echo "calendar"| nc -U ~/.flow-breaker/flow.sock
 flow-breaker claude-install
 ```
 
-This adds a `SessionStart` hook so Claude Code runs `flow-breaker nudge` at the start of every conversation, and appends instructions to `~/.claude/CLAUDE.md` telling Claude to surface alerts. Safe to run multiple times (idempotent).
+This command:
+1. Adds a `SessionStart` hook (matcher: `startup|resume`) to `~/.claude/settings.json` so Claude Code runs `flow-breaker nudge` at the start of every conversation
+2. Adds a `Bash(flow-breaker nudge*)` permission so the nudge command runs without prompts
+3. Appends instructions to `~/.claude/CLAUDE.md` telling Claude to surface alerts and monitor tasks with `/loop 30m flow-breaker nudge`
+
+Safe to run multiple times (idempotent).
 
 ### Claude Code usage
 
@@ -262,6 +283,9 @@ flow-breaker nudge
 
 # Or read the status file:
 cat ~/.flow-breaker/status.json | jq .nudge
+
+# Automated monitoring (inside Claude Code):
+/loop 30m flow-breaker nudge
 ```
 
 `nudge` returns context-aware one-liners:
@@ -272,6 +296,20 @@ cat ~/.flow-breaker/status.json | jq .nudge
 - `"✅ All clear — no more tasks today"`
 
 The `nudge` CLI command tries the live socket first (for alarm state), falls back to the status file, and finally computes from the task file if nothing else is available.
+
+### OpenCode setup
+
+```bash
+# One-command install — adds plugin + instructions to ~/.config/opencode/
+flow-breaker opencode-install
+```
+
+This command:
+1. Creates a plugin at `~/.config/opencode/plugins/flow-breaker.js` that injects the nudge output into system prompts every 30 minutes
+2. Adds a bash permission for `flow-breaker nudge*` to `~/.config/opencode/opencode.json`
+3. Appends instructions to `~/.config/opencode/AGENTS.md` telling the agent to surface alerts and check for overdue tasks
+
+Safe to run multiple times (idempotent). Handles JSONC files (trailing commas) used by OpenCode.
 
 ## Configuration
 
@@ -309,7 +347,7 @@ Settings are stored inside `tasks.json` and edited via the TUI settings screen (
 | Terminal bell | on | on/off |
 | Tmux flash | on | on/off |
 | Calendar enabled | off | on/off |
-| Calendar cache | 15 min | minutes |
+| Calendar cache | 15 min | 1–120 min |
 
 ## Recurrence types
 
