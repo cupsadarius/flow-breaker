@@ -35,6 +35,8 @@ type Task struct {
 	Tags       []string        `json:"tags,omitempty"`
 	CreatedAt  string          `json:"created_at"`
 	History    map[string]bool `json:"history,omitempty"`
+	Archived   bool            `json:"archived,omitempty"`
+	ArchivedAt string          `json:"archived_at,omitempty"`
 }
 
 type Settings struct {
@@ -52,13 +54,13 @@ type Settings struct {
 
 func defaultSettings() Settings {
 	return Settings{
-		SnoozeMins:      5,
-		AlertNotify:     true,
-		AlertDialog:     true,
-		AlertSpeech:     true,
-		AlertSound:      true,
-		AlertBell:       true,
-		AlertTmux:       true,
+		SnoozeMins:   5,
+		AlertNotify:  true,
+		AlertDialog:  true,
+		AlertSpeech:  true,
+		AlertSound:   true,
+		AlertBell:    true,
+		AlertTmux:    true,
 		CalEnabled:   false,
 		CalCacheMins: 15,
 	}
@@ -149,6 +151,47 @@ func (s *Store) deleteTask(id int) {
 	s.save()
 }
 
+// ActiveTasks returns non-archived tasks.
+func (s *Store) ActiveTasks() []Task {
+	var out []Task
+	for _, t := range s.Tasks {
+		if !t.Archived {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// ArchivedTasks returns archived tasks, most recently archived first.
+func (s *Store) ArchivedTasks() []Task {
+	var out []Task
+	for _, t := range s.Tasks {
+		if t.Archived {
+			out = append(out, t)
+		}
+	}
+	// sort by ArchivedAt descending
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ArchivedAt > out[j].ArchivedAt
+	})
+	return out
+}
+
+// activeIndex maps a position in the active-only view to the real index in s.Tasks.
+func (s *Store) activeIndex(activePos int) int {
+	count := 0
+	for i, t := range s.Tasks {
+		if t.Archived {
+			continue
+		}
+		if count == activePos {
+			return i
+		}
+		count++
+	}
+	return -1
+}
+
 func (s *Store) sortTasks() {
 	sort.Slice(s.Tasks, func(i, j int) bool {
 		return s.Tasks[i].Time < s.Tasks[j].Time
@@ -161,10 +204,10 @@ func (s *Store) importCalendarEvents(events []CalendarEvent) []Task {
 		if ev.AllDay {
 			continue
 		}
-		// deduplicate: skip if a task with same time+desc+gcal tag already exists
+		// deduplicate: skip if an active task with same time+desc+gcal tag already exists
 		dup := false
 		for _, t := range s.Tasks {
-			if t.Time == ev.StartTime && t.Desc == ev.Summary && hasTag(t.Tags, "gcal") {
+			if !t.Archived && t.Time == ev.StartTime && t.Desc == ev.Summary && hasTag(t.Tags, "gcal") {
 				dup = true
 				break
 			}
@@ -192,6 +235,7 @@ func (s *Store) resetDaily() {
 	if s.LastReset == today {
 		return
 	}
+	now := time.Now()
 	// record yesterday's completions in history before clearing
 	for i := range s.Tasks {
 		if s.Tasks[i].Done {
@@ -201,7 +245,23 @@ func (s *Store) resetDaily() {
 			s.Tasks[i].History[s.LastReset] = true
 		}
 	}
+	// archive once-tasks that were created before today
 	for i := range s.Tasks {
+		if s.Tasks[i].Archived {
+			continue
+		}
+		if s.Tasks[i].Recurrence == Once {
+			createdDate := createdOnDate(s.Tasks[i])
+			if createdDate.Before(startOfDay(now)) {
+				s.Tasks[i].Archived = true
+				s.Tasks[i].ArchivedAt = now.Format(time.RFC3339)
+			}
+		}
+	}
+	for i := range s.Tasks {
+		if s.Tasks[i].Archived {
+			continue
+		}
 		s.Tasks[i].Done = false
 		s.Tasks[i].Dismissed = false
 		s.Tasks[i].Snoozed = 0
@@ -210,9 +270,28 @@ func (s *Store) resetDaily() {
 	s.save()
 }
 
+// createdOnDate parses the CreatedAt field and returns the date portion.
+// Falls back to epoch if parsing fails (so the task gets archived).
+func createdOnDate(t Task) time.Time {
+	if t.CreatedAt != "" {
+		parsed, err := time.Parse(time.RFC3339, t.CreatedAt)
+		if err == nil {
+			return startOfDay(parsed)
+		}
+	}
+	return time.Time{} // epoch — will always be before today
+}
+
+func startOfDay(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
 var weekdayShort = [7]string{"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
 
 func shouldFireToday(t Task) bool {
+	if t.Archived {
+		return false
+	}
 	return shouldFireOnDay(t, time.Now().Weekday())
 }
 

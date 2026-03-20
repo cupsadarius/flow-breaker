@@ -52,7 +52,8 @@ flow-breaker add 14:00 "Call plumber" --repeat once
 |---------|-------------|
 | `flow-breaker` | Launch TUI |
 | `flow-breaker add <HH:MM> <desc> [flags]` | Add a task |
-| `flow-breaker list` / `ls` | List today's tasks |
+| `flow-breaker list` / `ls` | List today's active tasks |
+| `flow-breaker archive` | List archived one-off tasks |
 | `flow-breaker done <HH:MM or substring>` | Mark a task done (matches by time or description) |
 | `flow-breaker clear` | Delete all tasks |
 | `flow-breaker status` | Print JSON status report |
@@ -85,6 +86,7 @@ flow-breaker add 14:00 "Call plumber" --repeat once
 | `h` | Toggle habit tracker view |
 | `p` | Calendar events (import / timeline) |
 | `f` | Manage calendar feeds (or toggle full history in habit view) |
+| `v` | View archived one-off tasks |
 | `o` | Open settings |
 | `r` | Reload tasks from disk |
 | `j` / `down` | Move cursor down |
@@ -156,6 +158,17 @@ Press `f` to manage iCal feeds.
 | `d` / `x` | Delete selected feed (confirms with y/n) |
 | `q` / `ctrl+c` | Quit |
 | `esc` | Close |
+
+### Archive mode
+
+Press `v` to view archived one-off tasks.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate archived tasks |
+| `d` / `x` | Permanently delete archived task |
+| `v` / `esc` | Close |
+| `q` / `ctrl+c` | Quit |
 
 ## Habit tracker
 
@@ -353,7 +366,7 @@ Settings are stored inside `tasks.json` and edited via the TUI settings screen (
 
 | Type | Fires on |
 |------|----------|
-| `once` | Every day (until manually deleted) |
+| `once` | Day of creation only; auto-archived on next daily reset |
 | `daily` | Every day |
 | `weekdays` | Monday through Friday |
 | `weekly` | Every day (use custom days for specific weekdays) |

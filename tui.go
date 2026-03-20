@@ -25,25 +25,25 @@ const (
 )
 
 type model struct {
-	store      *Store
-	cursor     int
-	alarm      *alarmState
-	fired      map[int]bool
-	width      int
-	height     int
-	msg        string
-	msgExpiry  time.Time
-	inputMode  bool
-	inputField inputField
-	inputTime  string
-	inputDesc  string
-	inputRec   Recurrence
-	inputTags  string
-	inputDays  [7]bool
-	dayCursor    int
-	recCursor    int
-	editingID    int
-	scrollOffset int
+	store          *Store
+	cursor         int
+	alarm          *alarmState
+	fired          map[int]bool
+	width          int
+	height         int
+	msg            string
+	msgExpiry      time.Time
+	inputMode      bool
+	inputField     inputField
+	inputTime      string
+	inputDesc      string
+	inputRec       Recurrence
+	inputTags      string
+	inputDays      [7]bool
+	dayCursor      int
+	recCursor      int
+	editingID      int
+	scrollOffset   int
 	habitView      bool
 	habitFull      bool
 	confirmDel     bool
@@ -57,6 +57,9 @@ type model struct {
 	calTimelineMode bool
 	calLoading      bool
 	calError        string
+	// archive view
+	archiveMode   bool
+	archiveCursor int
 	// feed management
 	feedsMode       bool
 	feedsCursor     int
@@ -146,6 +149,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.confirmDel {
 			return m.handleConfirmDel(msg)
 		}
+		if m.archiveMode {
+			return m.handleArchive(msg)
+		}
 		if m.calSuggestMode {
 			return m.handleCalSuggestions(msg)
 		}
@@ -193,11 +199,12 @@ func (m *model) handleMacDialogResult(result string) {
 }
 
 func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	active := m.store.ActiveTasks()
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "j", "down":
-		if m.cursor < len(m.store.Tasks)-1 {
+		if m.cursor < len(active)-1 {
 			m.cursor++
 		}
 	case "k", "up":
@@ -207,8 +214,8 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		m.cursor = 0
 	case "G":
-		if len(m.store.Tasks) > 0 {
-			m.cursor = len(m.store.Tasks) - 1
+		if len(active) > 0 {
+			m.cursor = len(active) - 1
 		}
 	case "a":
 		m.inputMode = true
@@ -221,8 +228,8 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputDays = [7]bool{}
 		m.recCursor = 1
 	case "e":
-		if m.cursor >= 0 && m.cursor < len(m.store.Tasks) {
-			t := m.store.Tasks[m.cursor]
+		if m.cursor >= 0 && m.cursor < len(active) {
+			t := active[m.cursor]
 			m.inputMode = true
 			m.editingID = t.ID
 			m.inputField = fieldTime
@@ -241,12 +248,13 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "d", "x":
-		if len(m.store.Tasks) > 0 {
+		if len(active) > 0 {
 			m.confirmDel = true
 		}
 	case "c":
-		if m.cursor >= 0 && m.cursor < len(m.store.Tasks) {
-			t := &m.store.Tasks[m.cursor]
+		realIdx := m.store.activeIndex(m.cursor)
+		if realIdx >= 0 {
+			t := &m.store.Tasks[realIdx]
 			t.Done = !t.Done
 			if t.Done {
 				today := time.Now().Format("2006-01-02")
@@ -287,6 +295,14 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		*m.store = loadStore()
 		m.store.resetDaily()
 		m.setMsg("Reloaded")
+	case "v":
+		archived := m.store.ArchivedTasks()
+		if len(archived) > 0 {
+			m.archiveMode = true
+			m.archiveCursor = 0
+		} else {
+			m.setMsg("No archived tasks")
+		}
 	}
 	return m, nil
 }
@@ -322,9 +338,11 @@ func (m model) handleAlarmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) handleConfirmDel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
-		if m.cursor >= 0 && m.cursor < len(m.store.Tasks) {
-			m.store.deleteTask(m.store.Tasks[m.cursor].ID)
-			if m.cursor >= len(m.store.Tasks) && m.cursor > 0 {
+		realIdx := m.store.activeIndex(m.cursor)
+		if realIdx >= 0 {
+			m.store.deleteTask(m.store.Tasks[realIdx].ID)
+			active := m.store.ActiveTasks()
+			if m.cursor >= len(active) && m.cursor > 0 {
 				m.cursor--
 			}
 			m.setMsg("Deleted")
@@ -750,6 +768,99 @@ func (m model) handleFeeds(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleArchive(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	archived := m.store.ArchivedTasks()
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc", "v":
+		m.archiveMode = false
+	case "j", "down":
+		if m.archiveCursor < len(archived)-1 {
+			m.archiveCursor++
+		}
+	case "k", "up":
+		if m.archiveCursor > 0 {
+			m.archiveCursor--
+		}
+	case "d", "x":
+		if m.archiveCursor >= 0 && m.archiveCursor < len(archived) {
+			m.store.deleteTask(archived[m.archiveCursor].ID)
+			archived = m.store.ArchivedTasks()
+			if m.archiveCursor >= len(archived) && m.archiveCursor > 0 {
+				m.archiveCursor--
+			}
+			if len(archived) == 0 {
+				m.archiveMode = false
+			}
+			m.setMsg("Deleted from archive")
+		}
+	}
+	return m, nil
+}
+
+func (m model) renderArchive() string {
+	archived := m.store.ArchivedTasks()
+	var inner strings.Builder
+	inner.WriteString(inputLabelStyle.Render("  Archive — past one-off tasks"))
+	inner.WriteString("\n\n")
+
+	if len(archived) == 0 {
+		inner.WriteString(dimStyle.Render("  No archived tasks"))
+		inner.WriteString("\n")
+	} else {
+		for i, t := range archived {
+			icon := "·"
+			if t.Done {
+				icon = "✓"
+			} else if t.Dismissed {
+				icon = "–"
+			}
+
+			archivedDate := ""
+			if t.ArchivedAt != "" {
+				if parsed, err := time.Parse(time.RFC3339, t.ArchivedAt); err == nil {
+					archivedDate = parsed.Format("Jan 02")
+				}
+			}
+
+			tags := ""
+			if len(t.Tags) > 0 {
+				tags = " (" + strings.Join(t.Tags, ", ") + ")"
+			}
+
+			line := fmt.Sprintf("  %s %5s  %-30s%s  %s", icon, t.Time, t.Desc, tags, dimStyle.Render(archivedDate))
+
+			if i == m.archiveCursor {
+				inner.WriteString(cursorStyle.Render(fmt.Sprintf("  %s %5s  %-30s%s  ", icon, t.Time, t.Desc, tags)))
+				inner.WriteString(dimStyle.Render(archivedDate))
+			} else if t.Done {
+				inner.WriteString(doneStyle.Render(line))
+			} else {
+				inner.WriteString(normalStyle.Render(line))
+			}
+			inner.WriteString("\n")
+		}
+	}
+
+	inner.WriteString("\n")
+	inner.WriteString(dimStyle.Render("  j/k:navigate  d:delete  v/esc:back"))
+	inner.WriteString("\n")
+
+	boxWidth := m.width - 4
+	if boxWidth < 60 {
+		boxWidth = 60
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("14")).
+		Padding(1, 2).
+		Width(boxWidth)
+
+	return box.Render(inner.String()) + "\n"
+}
+
 func (m model) renderFeeds() string {
 	var inner strings.Builder
 	inner.WriteString(inputLabelStyle.Render("  Calendar Feeds"))
@@ -828,7 +939,7 @@ func (m model) renderFeeds() string {
 
 func (m model) isEventImported(ev CalendarEvent) bool {
 	for _, t := range m.store.Tasks {
-		if t.Time == ev.StartTime && t.Desc == ev.Summary && hasTag(t.Tags, "gcal") {
+		if !t.Archived && t.Time == ev.StartTime && t.Desc == ev.Summary && hasTag(t.Tags, "gcal") {
 			return true
 		}
 	}
@@ -887,8 +998,8 @@ var (
 			Bold(true)
 
 	inputActiveStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("11")).
-			Bold(true)
+				Foreground(lipgloss.Color("11")).
+				Bold(true)
 
 	msgStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("14")).
@@ -902,7 +1013,7 @@ var (
 			Foreground(lipgloss.Color("9"))
 
 	habitDismissStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("11"))
+				Foreground(lipgloss.Color("11"))
 )
 
 const (
@@ -952,7 +1063,8 @@ func (m model) View() string {
 	}
 
 	// next up
-	for _, t := range m.store.Tasks {
+	active := m.store.ActiveTasks()
+	for _, t := range active {
 		if t.Done || t.Dismissed || !shouldFireToday(t) {
 			continue
 		}
@@ -979,7 +1091,7 @@ func (m model) View() string {
 	} else {
 		// responsive column widths — compute dynamic STATUS width
 		statusWidth := 11 // minimum ("overdue ..." baseline)
-		for _, t := range m.store.Tasks {
+		for _, t := range active {
 			var s string
 			if t.Done {
 				s = "done"
@@ -1016,7 +1128,7 @@ func (m model) View() string {
 		b.WriteString(dimStyle.Render(sep))
 		b.WriteString("\n")
 
-		if len(m.store.Tasks) == 0 {
+		if len(active) == 0 {
 			b.WriteString(dimStyle.Render("  No tasks yet — press 'a' to add one"))
 			b.WriteString("\n")
 		}
@@ -1037,7 +1149,7 @@ func (m model) View() string {
 			m.scrollOffset = m.cursor - visibleRows + 1
 		}
 
-		taskCount := len(m.store.Tasks)
+		taskCount := len(active)
 		startIdx := m.scrollOffset
 		endIdx := startIdx + visibleRows
 		if endIdx > taskCount {
@@ -1051,7 +1163,7 @@ func (m model) View() string {
 		}
 
 		for i := startIdx; i < endIdx; i++ {
-			t := m.store.Tasks[i]
+			t := active[i]
 			icon := "·"
 			status := fmtDuration(timeUntil(t))
 			style := normalStyle
@@ -1152,8 +1264,12 @@ func (m model) View() string {
 		b.WriteString(m.renderInput())
 	}
 
-	if m.confirmDel && m.cursor >= 0 && m.cursor < len(m.store.Tasks) {
-		t := m.store.Tasks[m.cursor]
+	if m.archiveMode {
+		b.WriteString(m.renderArchive())
+	}
+
+	if m.confirmDel && m.cursor >= 0 && m.cursor < len(active) {
+		t := active[m.cursor]
 		b.WriteString(urgentStyle.Render(fmt.Sprintf("  Delete '%s'? (y/n)", t.Desc)))
 		b.WriteString("\n")
 	}
@@ -1163,9 +1279,9 @@ func (m model) View() string {
 		b.WriteString("\n")
 	}
 
-	if !m.inputMode && !m.confirmDel && !m.calSuggestMode {
+	if !m.inputMode && !m.confirmDel && !m.calSuggestMode && !m.archiveMode {
 		b.WriteString("\n")
-		helpKeys := "  a:add  e:edit  d:del  c:done  h:habits  f:feeds"
+		helpKeys := "  a:add  e:edit  d:del  c:done  h:habits  v:archive  f:feeds"
 		if m.store.Settings.CalEnabled {
 			helpKeys += "  p:calendar"
 		}
@@ -1589,7 +1705,7 @@ func (m model) renderTimeline() string {
 			maxHour = h
 		}
 	}
-	for _, t := range m.store.Tasks {
+	for _, t := range m.store.ActiveTasks() {
 		if !shouldFireToday(t) {
 			continue
 		}
@@ -1640,7 +1756,7 @@ func (m model) renderTimeline() string {
 
 		// find task for this hour
 		var taskLabel string
-		for _, t := range m.store.Tasks {
+		for _, t := range m.store.ActiveTasks() {
 			if !shouldFireToday(t) {
 				continue
 			}
@@ -1740,10 +1856,10 @@ func (m model) renderHabits(w, _ int) string {
 	b.WriteString(inputLabelStyle.Render(title))
 	b.WriteString("\n\n")
 
-	// filter to recurring tasks only
+	// filter to recurring tasks only (exclude archived)
 	var habits []Task
 	for _, t := range m.store.Tasks {
-		if t.Recurrence != Once {
+		if !t.Archived && t.Recurrence != Once {
 			habits = append(habits, t)
 		}
 	}
@@ -1772,7 +1888,7 @@ func (m model) renderHabits(w, _ int) string {
 	// generate date list (most recent last)
 	dates := make([]time.Time, days)
 	for i := range dates {
-		dates[i] = now.AddDate(0, 0, -(days-1-i))
+		dates[i] = now.AddDate(0, 0, -(days - 1 - i))
 	}
 
 	// task name column width
@@ -1841,4 +1957,3 @@ func (m model) renderHabits(w, _ int) string {
 	b.WriteString("\n")
 	return b.String()
 }
-
