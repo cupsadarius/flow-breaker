@@ -14,6 +14,8 @@ func main() {
 			cliAdd(os.Args[2:])
 		case "list", "ls":
 			cliList()
+		case "archive":
+			cliArchive()
 		case "done":
 			cliDone(os.Args[2:])
 		case "clear":

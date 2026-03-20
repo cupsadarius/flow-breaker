@@ -44,7 +44,7 @@ func buildStatus(store *Store, alarm *alarmState) StatusReport {
 	}
 
 	for _, t := range store.Tasks {
-		if !shouldFireToday(t) {
+		if t.Archived || !shouldFireToday(t) {
 			continue
 		}
 		d := timeUntil(t)

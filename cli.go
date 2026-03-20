@@ -57,11 +57,12 @@ func cliAdd(args []string) {
 func cliList() {
 	s := loadStore()
 	s.resetDaily()
-	if len(s.Tasks) == 0 {
+	active := s.ActiveTasks()
+	if len(active) == 0 {
 		fmt.Println("No tasks.")
 		return
 	}
-	for _, t := range s.Tasks {
+	for _, t := range active {
 		icon := " "
 		if t.Done {
 			icon = "✓"
@@ -74,6 +75,35 @@ func cliList() {
 	}
 }
 
+func cliArchive() {
+	s := loadStore()
+	archived := s.ArchivedTasks()
+	if len(archived) == 0 {
+		fmt.Println("No archived tasks.")
+		return
+	}
+	fmt.Printf("📦 Archived tasks (%d):\n\n", len(archived))
+	for _, t := range archived {
+		icon := " "
+		if t.Done {
+			icon = "✓"
+		} else if t.Dismissed {
+			icon = "–"
+		}
+		tags := ""
+		if len(t.Tags) > 0 {
+			tags = " [" + strings.Join(t.Tags, ",") + "]"
+		}
+		archivedDate := ""
+		if t.ArchivedAt != "" {
+			if parsed, err := time.Parse(time.RFC3339, t.ArchivedAt); err == nil {
+				archivedDate = parsed.Format("Jan 02")
+			}
+		}
+		fmt.Printf(" %s %5s  %-30s%s  %s\n", icon, t.Time, t.Desc, tags, archivedDate)
+	}
+}
+
 func cliDone(args []string) {
 	if len(args) < 1 {
 		fmt.Println("usage: flow-breaker done <HH:MM or description substring>")
@@ -82,6 +112,9 @@ func cliDone(args []string) {
 	q := strings.ToLower(strings.Join(args, " "))
 	s := loadStore()
 	for i, t := range s.Tasks {
+		if t.Archived {
+			continue
+		}
 		if strings.ToLower(t.Time) == q || strings.Contains(strings.ToLower(t.Desc), q) {
 			s.Tasks[i].Done = true
 			s.save()
@@ -635,7 +668,8 @@ func printUsage() {
 USAGE:
   flow-breaker              launch TUI
   flow-breaker add <args>   add a task from CLI
-  flow-breaker list         list today's tasks
+  flow-breaker list         list today's active tasks
+  flow-breaker archive      list archived one-off tasks
   flow-breaker done <q>     mark a task done
   flow-breaker clear        delete all tasks
   flow-breaker status       JSON status (for scripts)
