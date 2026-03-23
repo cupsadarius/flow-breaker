@@ -48,6 +48,7 @@ func main() {
 
 	s := loadStore()
 	s.resetDaily()
+	captureTmuxPane()
 	alarm := &alarmState{}
 
 	// start socket server
