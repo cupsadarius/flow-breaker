@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// ── tmux pane tracking ───────────────────────────────────────────────────────
+
+var tmuxPaneID string
+
+func captureTmuxPane() {
+	tmuxPaneID = os.Getenv("TMUX_PANE")
+}
+
 // ── Alerts: macOS native + tmux + terminal bell ────────────────────────────
 
 func alertAll(title, body string, cfg *Settings) {
@@ -68,12 +76,44 @@ func tmuxAlert(msg string) {
 	if os.Getenv("TMUX") == "" {
 		return
 	}
-	exec.Command("tmux", "display-message", "-d", "5000", "⚡ "+msg).Start()
-	exec.Command("tmux", "select-pane", "-P", "bg=red").Start()
-	go func() {
-		time.Sleep(3 * time.Second)
-		exec.Command("tmux", "select-pane", "-P", "bg=default").Start()
-	}()
+
+	target := tmuxPaneID
+
+	// Switch to the flow-breaker window if not already visible.
+	if target != "" {
+		out, err := exec.Command("tmux", "display-message", "-t", target,
+			"-p", "#{window_active}#{session_attached}").Output()
+		if err == nil {
+			state := strings.TrimSpace(string(out))
+			if state != "11" {
+				// Resolve session:window from our pane.
+				sw, err := exec.Command("tmux", "display-message", "-t", target,
+					"-p", "#{session_name}:#{window_index}").Output()
+				if err == nil {
+					sessionWindow := strings.TrimSpace(string(sw))
+					exec.Command("tmux", "switch-client", "-t", sessionWindow).Run()
+					exec.Command("tmux", "select-window", "-t", sessionWindow).Run()
+				}
+			}
+		}
+	}
+
+	// Flash pane and show message, targeting our specific pane if known.
+	if target != "" {
+		exec.Command("tmux", "display-message", "-t", target, "-d", "5000", "⚡ "+msg).Start()
+		exec.Command("tmux", "select-pane", "-t", target, "-P", "bg=red").Start()
+		go func() {
+			time.Sleep(3 * time.Second)
+			exec.Command("tmux", "select-pane", "-t", target, "-P", "bg=default").Start()
+		}()
+	} else {
+		exec.Command("tmux", "display-message", "-d", "5000", "⚡ "+msg).Start()
+		exec.Command("tmux", "select-pane", "-P", "bg=red").Start()
+		go func() {
+			time.Sleep(3 * time.Second)
+			exec.Command("tmux", "select-pane", "-P", "bg=default").Start()
+		}()
+	}
 }
 
 // ── Alarm state ────────────────────────────────────────────────────────────

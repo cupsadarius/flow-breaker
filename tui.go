@@ -181,6 +181,7 @@ func (m *model) handleMacDialogResult(result string) {
 	case strings.Contains(result, "Snooze"):
 		snz := m.store.Settings.SnoozeMins
 		m.store.Tasks[idx].Snoozed = time.Now().Add(time.Duration(snz) * time.Minute).Unix()
+		delete(m.fired, m.store.Tasks[idx].ID)
 		m.store.save()
 		m.alarm.snooze(snz)
 		m.setMsg(fmt.Sprintf("Snoozed %d min (via dialog)", snz))
@@ -322,6 +323,7 @@ func (m model) handleAlarmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		snz := m.store.Settings.SnoozeMins
 		m.store.Tasks[idx].Snoozed = time.Now().Add(time.Duration(snz) * time.Minute).Unix()
+		delete(m.fired, m.store.Tasks[idx].ID)
 		m.store.save()
 		m.alarm.snooze(snz)
 		m.setMsg(fmt.Sprintf("Snoozed %d min", snz))
