@@ -44,7 +44,10 @@ func macNotify(title, body string) {
 		`display notification %q with title %q sound name "Glass"`,
 		body, title,
 	)
-	exec.Command("osascript", "-e", script).Start()
+	cmd := exec.Command("osascript", "-e", script)
+	if err := cmd.Start(); err == nil {
+		go cmd.Wait()
+	}
 }
 
 var macAlertResult = make(chan string, 16)
@@ -64,12 +67,18 @@ func macAlert(title, body string, snoozeMins int) {
 }
 
 func macSay(text string) {
-	exec.Command("say", "-v", "Samantha", "-r", "200", text).Start()
+	cmd := exec.Command("say", "-v", "Samantha", "-r", "200", text)
+	if err := cmd.Start(); err == nil {
+		go cmd.Wait()
+	}
 }
 
 func macSound(name string) {
 	path := "/System/Library/Sounds/" + name + ".aiff"
-	exec.Command("afplay", path).Start()
+	cmd := exec.Command("afplay", path)
+	if err := cmd.Start(); err == nil {
+		go cmd.Wait()
+	}
 }
 
 func tmuxAlert(msg string) {
@@ -100,18 +109,36 @@ func tmuxAlert(msg string) {
 
 	// Flash pane and show message, targeting our specific pane if known.
 	if target != "" {
-		exec.Command("tmux", "display-message", "-t", target, "-d", "5000", "⚡ "+msg).Start()
-		exec.Command("tmux", "select-pane", "-t", target, "-P", "bg=red").Start()
+		cmd1 := exec.Command("tmux", "display-message", "-t", target, "-d", "5000", "⚡ "+msg)
+		if err := cmd1.Start(); err == nil {
+			go cmd1.Wait()
+		}
+		cmd2 := exec.Command("tmux", "select-pane", "-t", target, "-P", "bg=red")
+		if err := cmd2.Start(); err == nil {
+			go cmd2.Wait()
+		}
 		go func() {
 			time.Sleep(3 * time.Second)
-			exec.Command("tmux", "select-pane", "-t", target, "-P", "bg=default").Start()
+			cmd3 := exec.Command("tmux", "select-pane", "-t", target, "-P", "bg=default")
+			if err := cmd3.Start(); err == nil {
+				cmd3.Wait()
+			}
 		}()
 	} else {
-		exec.Command("tmux", "display-message", "-d", "5000", "⚡ "+msg).Start()
-		exec.Command("tmux", "select-pane", "-P", "bg=red").Start()
+		cmd1 := exec.Command("tmux", "display-message", "-d", "5000", "⚡ "+msg)
+		if err := cmd1.Start(); err == nil {
+			go cmd1.Wait()
+		}
+		cmd2 := exec.Command("tmux", "select-pane", "-P", "bg=red")
+		if err := cmd2.Start(); err == nil {
+			go cmd2.Wait()
+		}
 		go func() {
 			time.Sleep(3 * time.Second)
-			exec.Command("tmux", "select-pane", "-P", "bg=default").Start()
+			cmd3 := exec.Command("tmux", "select-pane", "-P", "bg=default")
+			if err := cmd3.Start(); err == nil {
+				cmd3.Wait()
+			}
 		}()
 	}
 }
