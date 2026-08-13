@@ -28,3 +28,17 @@ func TestHealthRoute(t *testing.T) {
 		t.Fatalf("body = %q, want %q", string(body), "ok")
 	}
 }
+
+func TestDaemonAddrDefaultLoopback(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_ADDR", "")
+	if got := daemonAddr(); got != "127.0.0.1:7777" {
+		t.Fatalf("daemonAddr() = %q, want 127.0.0.1:7777 (loopback only)", got)
+	}
+}
+
+func TestDaemonAddrEnvOverride(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_ADDR", "0.0.0.0:9999")
+	if got := daemonAddr(); got != "0.0.0.0:9999" {
+		t.Fatalf("daemonAddr() = %q, want the env override", got)
+	}
+}

@@ -7,12 +7,15 @@ import (
 )
 
 // daemonAddr returns the address the daemon listens on, from FLOW_BREAKER_ADDR
-// or the default ":7777".
+// or the default "127.0.0.1:7777". The default binds loopback only: the daemon
+// is tailnet-only single-user, reached via `tailscale serve --bg 7777` proxying
+// to localhost, so it must never be exposed on the LAN. The env override lets a
+// host bind a specific interface if ever needed.
 func daemonAddr() string {
 	if addr := os.Getenv("FLOW_BREAKER_ADDR"); addr != "" {
 		return addr
 	}
-	return ":7777"
+	return "127.0.0.1:7777"
 }
 
 // newDaemonMux builds the HTTP routes served by the daemon. The scheduler

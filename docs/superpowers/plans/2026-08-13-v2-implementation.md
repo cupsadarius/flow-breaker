@@ -128,7 +128,7 @@ func runDaemon() {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
-	addr := daemonAddr() // env FLOW_BREAKER_ADDR else ":7777"
+	addr := daemonAddr() // env FLOW_BREAKER_ADDR else "127.0.0.1:7777" (loopback only — never bind the LAN; tailscale serve proxies tailnet→localhost)
 	log.Printf("flow-breaker daemon on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
