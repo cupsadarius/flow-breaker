@@ -21,6 +21,18 @@ func newDaemonMux(store *Store) *http.ServeMux {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
+
+	// Mutation routes (each persists the source field).
+	mux.HandleFunc("POST /task", handleAddTask(store))
+	mux.HandleFunc("POST /task/{id}/done", handleDone(store))
+	mux.HandleFunc("POST /task/{id}/snooze", handleSnooze(store))
+	mux.HandleFunc("POST /task/{id}", handleEdit(store))
+	mux.HandleFunc("DELETE /task/{id}", handleDelete(store))
+
+	// Read routes.
+	mux.HandleFunc("GET /tasks", handleTasks(store))
+	mux.HandleFunc("GET /status", handleStatus(store))
+
 	return mux
 }
 

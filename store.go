@@ -38,6 +38,9 @@ type Task struct {
 	History    map[string]bool `json:"history,omitempty"`
 	Archived   bool            `json:"archived,omitempty"`
 	ArchivedAt string          `json:"archived_at,omitempty"`
+	// Source records who created/last-mutated the task. One of:
+	// tui/cli/ntfy/claude-code/opencode/codex/phone/api/calendar.
+	Source string `json:"source,omitempty"`
 }
 
 type Settings struct {
@@ -122,6 +125,12 @@ func (s *Store) saveLocked() {
 }
 
 func (s *Store) addTask(timeStr, desc string, rec Recurrence, tags, days []string) Task {
+	return s.addTaskSource(timeStr, desc, rec, tags, days, "")
+}
+
+// addTaskSource is like addTask but stamps the Source field. It acquires the
+// write lock once and persists.
+func (s *Store) addTaskSource(timeStr, desc string, rec Recurrence, tags, days []string, source string) Task {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := Task{
@@ -132,12 +141,80 @@ func (s *Store) addTask(timeStr, desc string, rec Recurrence, tags, days []strin
 		Days:       days,
 		Tags:       tags,
 		CreatedAt:  time.Now().Format(time.RFC3339),
+		Source:     source,
 	}
 	s.NextID++
 	s.Tasks = append(s.Tasks, t)
 	s.sortTasks()
 	s.saveLocked()
 	return t
+}
+
+// markDone sets Done=true, stamps Source, and persists. Returns the updated
+// task, or an error if the id is not found. Acquires the write lock once.
+func (s *Store) markDone(id int, source string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, err := s.findTaskByID(id)
+	if err != nil {
+		return Task{}, err
+	}
+	s.Tasks[i].Done = true
+	s.Tasks[i].Source = source
+	s.saveLocked()
+	return s.Tasks[i], nil
+}
+
+// snoozeTask sets Snoozed to now+minutes, stamps Source, and persists. When
+// minutes <= 0 it falls back to Settings.SnoozeMins (resolved under the lock to
+// avoid a race). Returns the updated task or an error if the id is not found.
+func (s *Store) snoozeTask(id int, minutes int, source string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, err := s.findTaskByID(id)
+	if err != nil {
+		return Task{}, err
+	}
+	if minutes <= 0 {
+		minutes = s.Settings.SnoozeMins
+	}
+	s.Tasks[i].Snoozed = time.Now().Add(time.Duration(minutes) * time.Minute).Unix()
+	s.Tasks[i].Source = source
+	s.saveLocked()
+	return s.Tasks[i], nil
+}
+
+// editTaskSource applies each non-nil field to the task, stamps Source, and
+// persists. A nil pointer leaves that field unchanged (partial edit). Returns
+// the updated task or an error if the id is not found. Acquires the write lock
+// once; re-resolves the index after sorting since sortTasks may reorder.
+func (s *Store) editTaskSource(id int, timeStr, desc *string, rec *Recurrence, tags, days *[]string, source string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, err := s.findTaskByID(id)
+	if err != nil {
+		return Task{}, err
+	}
+	if timeStr != nil {
+		s.Tasks[i].Time = *timeStr
+	}
+	if desc != nil {
+		s.Tasks[i].Desc = *desc
+	}
+	if rec != nil {
+		s.Tasks[i].Recurrence = *rec
+	}
+	if tags != nil {
+		s.Tasks[i].Tags = *tags
+	}
+	if days != nil {
+		s.Tasks[i].Days = *days
+	}
+	s.Tasks[i].Source = source
+	s.sortTasks()
+	s.saveLocked()
+	i, _ = s.findTaskByID(id)
+	return s.Tasks[i], nil
 }
 
 func (s *Store) editTask(id int, timeStr, desc string, rec Recurrence, tags, days []string) {
@@ -170,6 +247,8 @@ func (s *Store) deleteTask(id int) {
 }
 
 // findTaskByID returns the index of the task with the given id, or an error.
+// It takes NO lock; the caller must hold s.mu (the returned index is only valid
+// while that lock is held).
 func (s *Store) findTaskByID(id int) (int, error) {
 	for i := range s.Tasks {
 		if s.Tasks[i].ID == id {
