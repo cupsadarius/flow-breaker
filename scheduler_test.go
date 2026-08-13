@@ -49,6 +49,37 @@ func TestTickIgnoresTaskOutsideWindow(t *testing.T) {
 	}
 }
 
+func TestTickRefiresAfterDayRollover(t *testing.T) {
+	// A Daily task fires today, then re-fires at the same wall-time next day
+	// (the fired map must reset at the day boundary).
+	task := dueTask(1, 0)
+	store := &Store{Tasks: []Task{task}, NextID: 2}
+	sc := newScheduler(store)
+
+	sc.tickOnce(schedNow)
+	if sc.firingID != 1 || !sc.fired[1] {
+		t.Fatalf("day 1: firingID=%d fired[1]=%v, want 1/true", sc.firingID, sc.fired[1])
+	}
+
+	// Simulate the alarm being acked (done) so firing clears, then advance the
+	// clock 24h to the same wall-time the next day.
+	store.mu.Lock()
+	store.Tasks[0].Done = true
+	store.mu.Unlock()
+	next := schedNow.Add(24 * time.Hour)
+	sc.tickOnce(next) // clears the stale firing
+
+	// Reset done (a real daily reset would clear it) and tick again next day.
+	store.mu.Lock()
+	store.Tasks[0].Done = false
+	store.mu.Unlock()
+	sc.tickOnce(next)
+
+	if sc.firingID != 1 || !sc.fired[1] {
+		t.Fatalf("day 2: firingID=%d fired[1]=%v, want 1/true (re-fired next day)", sc.firingID, sc.fired[1])
+	}
+}
+
 func TestTickIgnoresFutureTask(t *testing.T) {
 	task := dueTask(1, 30*time.Minute) // future
 	store := &Store{Tasks: []Task{task}, NextID: 2}

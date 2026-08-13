@@ -162,18 +162,17 @@ func handleTasks(store *Store) http.HandlerFunc {
 	}
 }
 
-// handleStatus handles GET /status. It resolves the scheduler's firing task ID
-// to its current slice index, then hands buildStatus a transient alarmState.
-// The firing task is tracked by stable ID; the index is derived per-request and
-// only valid for this call.
+// handleStatus handles GET /status. The scheduler tracks the firing task by
+// stable ID; here it is resolved to its current slice index and the report is
+// built under ONE read lock, so a concurrent write (add/edit/delete →
+// sortTasks) cannot move the task between resolving the index and reading it.
 func handleStatus(store *Store, sc *scheduler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		id := sc.firing()
+
+		store.mu.RLock()
 		var alarm *alarmState
-		if id := sc.firing(); id != 0 {
-			// Resolve ID -> current index under the read lock, then RELEASE it
-			// before calling buildStatus (which takes its own RLock). Never nest
-			// the two RLocks: a writer waiting between them could deadlock.
-			store.mu.RLock()
+		if id != 0 {
 			idx := -1
 			for i := range store.Tasks {
 				if store.Tasks[i].ID == id {
@@ -181,16 +180,19 @@ func handleStatus(store *Store, sc *scheduler) http.HandlerFunc {
 					break
 				}
 			}
-			store.mu.RUnlock()
-
 			if idx >= 0 {
 				alarm = &alarmState{active: true, taskIdx: idx}
-			} else {
-				// Firing task no longer exists (e.g. deleted): clear the stale
-				// state and report no alarm.
-				sc.clearFiring(id)
 			}
 		}
-		writeJSON(w, http.StatusOK, buildStatus(store, alarm))
+		report := buildStatusLocked(store, alarm)
+		store.mu.RUnlock()
+
+		// Firing task no longer exists (e.g. deleted): clear the stale state.
+		// Done after releasing the read lock — clearFiring takes the scheduler
+		// lock only, not the store lock.
+		if id != 0 && alarm == nil {
+			sc.clearFiring(id)
+		}
+		writeJSON(w, http.StatusOK, report)
 	}
 }

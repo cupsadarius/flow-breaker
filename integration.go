@@ -30,9 +30,17 @@ type TaskStatus struct {
 	Seconds   int    `json:"seconds"`
 }
 
+// buildStatus builds a StatusReport, taking the store read lock itself.
 func buildStatus(store *Store, alarm *alarmState) StatusReport {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
+	return buildStatusLocked(store, alarm)
+}
+
+// buildStatusLocked does the real work and assumes the caller already holds
+// store.mu for reading. Callers that need to resolve an alarm's task index and
+// build the report atomically (e.g. GET /status) use this under a single lock.
+func buildStatusLocked(store *Store, alarm *alarmState) StatusReport {
 	now := time.Now()
 	r := StatusReport{
 		Timestamp: now.Format(time.RFC3339),

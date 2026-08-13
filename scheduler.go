@@ -15,10 +15,11 @@ import (
 type scheduler struct {
 	store *Store
 
-	mu       sync.Mutex   // guards firingID, tick, fired
-	firingID int          // 0 = no alarm firing
-	tick     int          // ticks since the current alarm started firing
-	fired    map[int]bool // task ID -> already fired today
+	mu        sync.Mutex   // guards firingID, tick, fired, firedDate
+	firingID  int          // 0 = no alarm firing
+	tick      int          // Phase 6 ladder counter (write-only this phase)
+	fired     map[int]bool // task ID -> already fired today
+	firedDate string       // day the fired map applies to ("2006-01-02")
 }
 
 func newScheduler(store *Store) *scheduler {
@@ -65,6 +66,13 @@ func (sc *scheduler) tickOnce(now time.Time) {
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
+
+	// Day rollover: a long-lived daemon must forget yesterday's fired flags so
+	// Daily/Weekdays tasks fire again today.
+	if day := now.Format("2006-01-02"); day != sc.firedDate {
+		sc.fired = map[int]bool{}
+		sc.firedDate = day
+	}
 
 	// A currently-snoozed task clears its fired flag so it re-fires once the
 	// snooze lapses (matches v1).
@@ -116,6 +124,8 @@ func meetsFireWindow(t Task, now time.Time) bool {
 		return false
 	}
 	d := timeUntilAt(t, now)
+	// The -2min floor means a task overdue by more than 2 minutes at daemon
+	// startup is not re-armed; Phase 6 does restart reconstruction for that.
 	return d <= 0 && d >= -2*time.Minute
 }
 
