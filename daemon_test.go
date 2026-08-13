@@ -8,7 +8,7 @@ import (
 )
 
 func TestHealthRoute(t *testing.T) {
-	srv := httptest.NewServer(newDaemonMux(&Store{}))
+	srv := httptest.NewServer(newDaemonMux(&Store{}, newScheduler(&Store{})))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/health")

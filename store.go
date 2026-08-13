@@ -428,10 +428,16 @@ func startOfDay(t time.Time) time.Time {
 var weekdayShort = [7]string{"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
 
 func shouldFireToday(t Task) bool {
+	return shouldFireTodayAt(t, time.Now())
+}
+
+// shouldFireTodayAt is shouldFireToday with an injectable clock (used by the
+// daemon scheduler so firing can be evaluated deterministically).
+func shouldFireTodayAt(t Task, now time.Time) bool {
 	if t.Archived {
 		return false
 	}
-	return shouldFireOnDay(t, time.Now().Weekday())
+	return shouldFireOnDay(t, now.Weekday())
 }
 
 func shouldFireOnDay(t Task, wd time.Weekday) bool {
@@ -453,7 +459,12 @@ func shouldFireOnDay(t Task, wd time.Weekday) bool {
 }
 
 func parseTaskTime(s string) (time.Time, bool) {
-	now := time.Now()
+	return parseTaskTimeAt(s, time.Now())
+}
+
+// parseTaskTimeAt is parseTaskTime with an injectable clock: it resolves the
+// task's HH:MM against now's date/location.
+func parseTaskTimeAt(s string, now time.Time) (time.Time, bool) {
 	for _, f := range []string{"15:04", "3:04PM", "3:04 PM", "1504"} {
 		t, err := time.Parse(f, strings.ToUpper(s))
 		if err == nil {
@@ -465,11 +476,16 @@ func parseTaskTime(s string) (time.Time, bool) {
 }
 
 func timeUntil(t Task) time.Duration {
-	target, ok := parseTaskTime(t.Time)
+	return timeUntilAt(t, time.Now())
+}
+
+// timeUntilAt is timeUntil with an injectable clock.
+func timeUntilAt(t Task, now time.Time) time.Duration {
+	target, ok := parseTaskTimeAt(t.Time, now)
 	if !ok {
 		return 999 * time.Hour
 	}
-	return time.Until(target)
+	return target.Sub(now)
 }
 
 func nextOccurrenceLabel(t Task) string {

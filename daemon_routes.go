@@ -162,10 +162,35 @@ func handleTasks(store *Store) http.HandlerFunc {
 	}
 }
 
-// handleStatus handles GET /status. The scheduler that populates the alarm is
-// Phase 1B, so a nil alarm is passed here (alarm_firing is always false).
-func handleStatus(store *Store) http.HandlerFunc {
+// handleStatus handles GET /status. It resolves the scheduler's firing task ID
+// to its current slice index, then hands buildStatus a transient alarmState.
+// The firing task is tracked by stable ID; the index is derived per-request and
+// only valid for this call.
+func handleStatus(store *Store, sc *scheduler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, buildStatus(store, nil))
+		var alarm *alarmState
+		if id := sc.firing(); id != 0 {
+			// Resolve ID -> current index under the read lock, then RELEASE it
+			// before calling buildStatus (which takes its own RLock). Never nest
+			// the two RLocks: a writer waiting between them could deadlock.
+			store.mu.RLock()
+			idx := -1
+			for i := range store.Tasks {
+				if store.Tasks[i].ID == id {
+					idx = i
+					break
+				}
+			}
+			store.mu.RUnlock()
+
+			if idx >= 0 {
+				alarm = &alarmState{active: true, taskIdx: idx}
+			} else {
+				// Firing task no longer exists (e.g. deleted): clear the stale
+				// state and report no alarm.
+				sc.clearFiring(id)
+			}
+		}
+		writeJSON(w, http.StatusOK, buildStatus(store, alarm))
 	}
 }

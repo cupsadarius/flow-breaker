@@ -53,7 +53,7 @@ func decodeMap(t *testing.T, resp *http.Response) map[string]any {
 
 func TestAddTaskRoute(t *testing.T) {
 	store := newTestStore(t)
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "POST", srv.URL+"/task", map[string]any{
@@ -85,7 +85,7 @@ func TestAddTaskRoute(t *testing.T) {
 
 func TestAddTaskRouteExplicitSource(t *testing.T) {
 	store := newTestStore(t)
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "POST", srv.URL+"/task", map[string]any{
@@ -101,7 +101,7 @@ func TestAddTaskRouteExplicitSource(t *testing.T) {
 func TestDoneRoute(t *testing.T) {
 	store := newTestStore(t)
 	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "POST", fmt.Sprintf("%s/task/%d/done", srv.URL, seed.ID), map[string]any{"source": "cli"})
@@ -127,7 +127,7 @@ func TestDoneRoute(t *testing.T) {
 
 func TestDoneRouteNotFound(t *testing.T) {
 	store := newTestStore(t)
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "POST", srv.URL+"/task/999/done", map[string]any{"source": "cli"})
@@ -142,7 +142,7 @@ func TestDoneRouteNotFound(t *testing.T) {
 
 func TestDoneRouteBadID(t *testing.T) {
 	store := newTestStore(t)
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "POST", srv.URL+"/task/abc/done", map[string]any{"source": "cli"})
@@ -154,7 +154,7 @@ func TestDoneRouteBadID(t *testing.T) {
 func TestSnoozeRoute(t *testing.T) {
 	store := newTestStore(t)
 	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	// no minutes → default SnoozeMins
@@ -178,7 +178,7 @@ func TestSnoozeRoute(t *testing.T) {
 func TestSnoozeRouteExplicitMinutes(t *testing.T) {
 	store := newTestStore(t)
 	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "POST", fmt.Sprintf("%s/task/%d/snooze", srv.URL, seed.ID), map[string]any{"source": "api", "minutes": 30})
@@ -190,7 +190,7 @@ func TestSnoozeRouteExplicitMinutes(t *testing.T) {
 func TestEditRoute(t *testing.T) {
 	store := newTestStore(t)
 	seed := store.addTaskSource("09:00", "old", Daily, nil, nil, "tui")
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "POST", fmt.Sprintf("%s/task/%d", srv.URL, seed.ID), map[string]any{
@@ -220,7 +220,7 @@ func TestEditRoute(t *testing.T) {
 func TestDeleteRoute(t *testing.T) {
 	store := newTestStore(t)
 	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "DELETE", fmt.Sprintf("%s/task/%d", srv.URL, seed.ID), map[string]any{"source": "cli"})
@@ -238,7 +238,7 @@ func TestDeleteRoute(t *testing.T) {
 
 func TestDeleteRouteNotFound(t *testing.T) {
 	store := newTestStore(t)
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "DELETE", srv.URL+"/task/999", map[string]any{"source": "cli"})
@@ -254,7 +254,7 @@ func TestDeleteRouteNotFound(t *testing.T) {
 func TestEditRouteEmptyRecurrenceUnchanged(t *testing.T) {
 	store := newTestStore(t)
 	seed := store.addTaskSource("09:00", "old", Daily, nil, nil, "tui")
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	// recurrence:"" is present but empty → should be treated as "leave unchanged".
@@ -278,7 +278,7 @@ func TestTasksRoute(t *testing.T) {
 	store := newTestStore(t)
 	store.addTaskSource("09:00", "a", Daily, nil, nil, "tui")
 	store.addTaskSource("10:00", "b", Daily, nil, nil, "tui")
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "GET", srv.URL+"/tasks", nil)
@@ -297,7 +297,7 @@ func TestTasksRoute(t *testing.T) {
 
 func TestTasksRouteEmpty(t *testing.T) {
 	store := newTestStore(t)
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "GET", srv.URL+"/tasks", nil)
@@ -314,7 +314,7 @@ func TestTasksRouteEmpty(t *testing.T) {
 func TestStatusRoute(t *testing.T) {
 	store := newTestStore(t)
 	store.addTaskSource("09:00", "a", Daily, nil, nil, "tui")
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	resp := doJSON(t, "GET", srv.URL+"/status", nil)
@@ -350,7 +350,7 @@ func TestStatusRoute(t *testing.T) {
 
 func TestConcurrentAddAndStatus(t *testing.T) {
 	store := newTestStore(t)
-	srv := httptest.NewServer(newDaemonMux(store))
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
 	const n = 50

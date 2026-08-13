@@ -15,8 +15,9 @@ func daemonAddr() string {
 	return ":7777"
 }
 
-// newDaemonMux builds the HTTP routes served by the daemon.
-func newDaemonMux(store *Store) *http.ServeMux {
+// newDaemonMux builds the HTTP routes served by the daemon. The scheduler
+// supplies the alarm-firing state read by GET /status.
+func newDaemonMux(store *Store, sc *scheduler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -31,7 +32,7 @@ func newDaemonMux(store *Store) *http.ServeMux {
 
 	// Read routes.
 	mux.HandleFunc("GET /tasks", handleTasks(store))
-	mux.HandleFunc("GET /status", handleStatus(store))
+	mux.HandleFunc("GET /status", handleStatus(store, sc))
 
 	return mux
 }
@@ -40,7 +41,9 @@ func newDaemonMux(store *Store) *http.ServeMux {
 func runDaemon() {
 	store := loadStore()
 	store.resetDaily()
-	mux := newDaemonMux(store)
+	sc := newScheduler(store)
+	go sc.run()
+	mux := newDaemonMux(store, sc)
 	addr := daemonAddr()
 	log.Printf("flow-breaker daemon on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
