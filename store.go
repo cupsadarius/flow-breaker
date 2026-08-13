@@ -201,7 +201,9 @@ func (s *Store) editTaskSource(id int, timeStr, desc *string, rec *Recurrence, t
 	if desc != nil {
 		s.Tasks[i].Desc = *desc
 	}
-	if rec != nil {
+	// An empty-string recurrence means "leave unchanged" (mirrors how add
+	// defaults it), so a present-but-blank field never clobbers the value.
+	if rec != nil && *rec != "" {
 		s.Tasks[i].Recurrence = *rec
 	}
 	if tags != nil {
@@ -213,7 +215,16 @@ func (s *Store) editTaskSource(id int, timeStr, desc *string, rec *Recurrence, t
 	s.Tasks[i].Source = source
 	s.sortTasks()
 	s.saveLocked()
-	i, _ = s.findTaskByID(id)
+	i, err = s.findTaskByID(id)
+	if err != nil {
+		return Task{}, err
+	}
+	if i < 0 {
+		return Task{}, fmt.Errorf("task %d not found", id)
+	}
+	// Returned Task is a value copy; its Days/Tags/History still alias the
+	// stored slices/map. Safe today because writers reassign slices wholesale
+	// (no in-place History writer exists yet).
 	return s.Tasks[i], nil
 }
 
@@ -244,6 +255,21 @@ func (s *Store) deleteTask(id int) {
 		}
 	}
 	s.saveLocked()
+}
+
+// deleteTaskChecked removes the task with the given id, persisting the store.
+// Returns an error if the id is not found (so callers can 404). Acquires the
+// write lock once.
+func (s *Store) deleteTaskChecked(id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, err := s.findTaskByID(id)
+	if err != nil {
+		return err
+	}
+	s.Tasks = append(s.Tasks[:i], s.Tasks[i+1:]...)
+	s.saveLocked()
+	return nil
 }
 
 // findTaskByID returns the index of the task with the given id, or an error.

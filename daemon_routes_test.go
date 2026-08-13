@@ -236,6 +236,44 @@ func TestDeleteRoute(t *testing.T) {
 	}
 }
 
+func TestDeleteRouteNotFound(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store))
+	defer srv.Close()
+
+	resp := doJSON(t, "DELETE", srv.URL+"/task/999", map[string]any{"source": "cli"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	m := decodeMap(t, resp)
+	if m["error"] == nil {
+		t.Fatalf("expected error field, got %v", m)
+	}
+}
+
+func TestEditRouteEmptyRecurrenceUnchanged(t *testing.T) {
+	store := newTestStore(t)
+	seed := store.addTaskSource("09:00", "old", Daily, nil, nil, "tui")
+	srv := httptest.NewServer(newDaemonMux(store))
+	defer srv.Close()
+
+	// recurrence:"" is present but empty → should be treated as "leave unchanged".
+	resp := doJSON(t, "POST", fmt.Sprintf("%s/task/%d", srv.URL, seed.ID), map[string]any{
+		"desc": "new", "recurrence": "", "source": "codex",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	m := decodeMap(t, resp)
+	task := m["task"].(map[string]any)
+	if task["recurrence"] != string(Daily) {
+		t.Fatalf("recurrence = %v, want daily (unchanged)", task["recurrence"])
+	}
+	if store.ActiveTasks()[0].Recurrence != Daily {
+		t.Fatalf("store recurrence changed: %v", store.ActiveTasks()[0].Recurrence)
+	}
+}
+
 func TestTasksRoute(t *testing.T) {
 	store := newTestStore(t)
 	store.addTaskSource("09:00", "a", Daily, nil, nil, "tui")

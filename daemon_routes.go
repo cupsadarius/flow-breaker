@@ -143,7 +143,10 @@ func handleDelete(store *Store) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		store.deleteTask(id)
+		if err := store.deleteTaskChecked(id); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }
