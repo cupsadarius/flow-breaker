@@ -22,6 +22,8 @@ func main() {
 			cliClear()
 		case "status":
 			cliStatus()
+		case "daemon":
+			runDaemon()
 		case "nudge":
 			cliNudge()
 		case "cal-add":
@@ -52,12 +54,12 @@ func main() {
 	alarm := &alarmState{}
 
 	// start socket server
-	startSocketServer(&s, alarm)
+	startSocketServer(s, alarm)
 	// write initial status
-	writeStatusFile(&s, alarm)
+	writeStatusFile(s, alarm)
 
 	m := model{
-		store: &s,
+		store: s,
 		alarm: alarm,
 		fired: make(map[int]bool),
 	}

@@ -134,7 +134,7 @@ func cliClear() {
 func cliStatus() {
 	s := loadStore()
 	s.resetDaily()
-	report := buildStatus(&s, &alarmState{})
+	report := buildStatus(s, &alarmState{})
 	data, _ := json.MarshalIndent(report, "", "  ")
 	fmt.Println(string(data))
 }
@@ -159,7 +159,7 @@ func cliNudge() {
 		// no TUI running, build from tasks file
 		s := loadStore()
 		s.resetDaily()
-		report := buildStatus(&s, &alarmState{})
+		report := buildStatus(s, &alarmState{})
 		fmt.Println(report.Nudge)
 		return
 	}

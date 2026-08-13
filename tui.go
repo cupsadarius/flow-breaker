@@ -293,7 +293,7 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.settingsMode = true
 		m.settingsCursor = 0
 	case "r":
-		*m.store = loadStore()
+		m.store = loadStore()
 		m.store.resetDaily()
 		m.setMsg("Reloaded")
 	case "v":

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -71,6 +72,9 @@ type Store struct {
 	LastReset string   `json:"last_reset"`
 	NextID    int      `json:"next_id"`
 	Settings  Settings `json:"settings"`
+
+	// mu guards concurrent access. encoding/json ignores unexported fields.
+	mu sync.RWMutex `json:"-"`
 }
 
 func dataDir() string {
@@ -87,14 +91,14 @@ func dataPath() string   { return filepath.Join(dataDir(), "tasks.json") }
 func statusPath() string { return filepath.Join(dataDir(), "status.json") }
 func sockPath() string   { return filepath.Join(dataDir(), "flow.sock") }
 
-func loadStore() Store {
-	var s Store
+func loadStore() *Store {
+	s := &Store{}
 	data, err := os.ReadFile(dataPath())
 	if err != nil {
 		s.NextID = 1
 		return s
 	}
-	json.Unmarshal(data, &s)
+	json.Unmarshal(data, s)
 	if s.NextID == 0 {
 		s.NextID = 1
 	}
@@ -104,12 +108,22 @@ func loadStore() Store {
 	return s
 }
 
+// save acquires the write lock and persists the store.
 func (s *Store) save() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveLocked()
+}
+
+// saveLocked persists the store; the caller must already hold s.mu.
+func (s *Store) saveLocked() {
 	data, _ := json.MarshalIndent(s, "", "  ")
 	os.WriteFile(dataPath(), data, 0o644)
 }
 
 func (s *Store) addTask(timeStr, desc string, rec Recurrence, tags, days []string) Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	t := Task{
 		ID:         s.NextID,
 		Time:       timeStr,
@@ -122,11 +136,13 @@ func (s *Store) addTask(timeStr, desc string, rec Recurrence, tags, days []strin
 	s.NextID++
 	s.Tasks = append(s.Tasks, t)
 	s.sortTasks()
-	s.save()
+	s.saveLocked()
 	return t
 }
 
 func (s *Store) editTask(id int, timeStr, desc string, rec Recurrence, tags, days []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i, t := range s.Tasks {
 		if t.ID == id {
 			s.Tasks[i].Time = timeStr
@@ -138,21 +154,35 @@ func (s *Store) editTask(id int, timeStr, desc string, rec Recurrence, tags, day
 		}
 	}
 	s.sortTasks()
-	s.save()
+	s.saveLocked()
 }
 
 func (s *Store) deleteTask(id int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i, t := range s.Tasks {
 		if t.ID == id {
 			s.Tasks = append(s.Tasks[:i], s.Tasks[i+1:]...)
 			break
 		}
 	}
-	s.save()
+	s.saveLocked()
+}
+
+// findTaskByID returns the index of the task with the given id, or an error.
+func (s *Store) findTaskByID(id int) (int, error) {
+	for i := range s.Tasks {
+		if s.Tasks[i].ID == id {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("task %d not found", id)
 }
 
 // ActiveTasks returns non-archived tasks.
 func (s *Store) ActiveTasks() []Task {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var out []Task
 	for _, t := range s.Tasks {
 		if !t.Archived {
@@ -164,6 +194,8 @@ func (s *Store) ActiveTasks() []Task {
 
 // ArchivedTasks returns archived tasks, most recently archived first.
 func (s *Store) ArchivedTasks() []Task {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var out []Task
 	for _, t := range s.Tasks {
 		if t.Archived {
@@ -231,6 +263,8 @@ func hasTag(tags []string, tag string) bool {
 }
 
 func (s *Store) resetDaily() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	today := time.Now().Format("2006-01-02")
 	if s.LastReset == today {
 		return
@@ -267,7 +301,7 @@ func (s *Store) resetDaily() {
 		s.Tasks[i].Snoozed = 0
 	}
 	s.LastReset = today
-	s.save()
+	s.saveLocked()
 }
 
 // createdOnDate parses the CreatedAt field and returns the date portion.

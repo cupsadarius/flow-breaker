@@ -31,6 +31,8 @@ type TaskStatus struct {
 }
 
 func buildStatus(store *Store, alarm *alarmState) StatusReport {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 	now := time.Now()
 	r := StatusReport{
 		Timestamp: now.Format(time.RFC3339),
