@@ -553,9 +553,10 @@ func shouldFireTodayAt(t Task, now time.Time) bool {
 	if t.Archived {
 		return false
 	}
-	// An explicit Date pins the task to exactly that day; empty = today / every
-	// applicable recurrence day.
-	if t.Date != "" && t.Date != now.Format("2006-01-02") {
+	// An explicit Date pins a ONCE task to exactly that day; empty = today.
+	// Scoped to Once so a stray Date on a recurring task can never zombie it —
+	// a dated non-Once task still fires on its recurrence, ignoring the Date.
+	if t.Recurrence == Once && t.Date != "" && t.Date != now.Format("2006-01-02") {
 		return false
 	}
 	return shouldFireOnDay(t, now.Weekday())

@@ -147,8 +147,6 @@ func collapseSpaces(s string) string {
 // the remainder as Desc with ok=true; otherwise ok=false and the caller decides
 // between the inbox floor and a Haiku call.
 func parseHeuristics(text string, now time.Time) (ParseResult, bool) {
-	today := now.Format("2006-01-02")
-
 	// ── relative offsets (Once; roll date across midnight) ───────────────
 	if loc := reInMinutes.FindStringSubmatchIndex(text); loc != nil {
 		return relativeResult(text, loc, now, time.Duration(atoi(text, loc, 2))*time.Minute), true
@@ -172,9 +170,10 @@ func parseHeuristics(text string, now time.Time) (ParseResult, bool) {
 		if !ok {
 			return ParseResult{}, false
 		}
+		// Recurring: leave Date empty so it fires every applicable weekday. A
+		// Date here would pin it to its creation day (see shouldFireTodayAt).
 		return ParseResult{
 			Time:       fmt.Sprintf("%02d:%02d", h, m),
-			Date:       today,
 			Recurrence: Weekdays,
 			Desc:       strip(text, loc[0:2]),
 		}, true
@@ -188,9 +187,10 @@ func parseHeuristics(text string, now time.Time) (ParseResult, bool) {
 			}
 			timeStr = fmt.Sprintf("%02d:%02d", h, m)
 		}
+		// Recurring: leave Date empty so it fires every day (see the Weekdays
+		// branch above and shouldFireTodayAt's Once-scoped gate).
 		return ParseResult{
 			Time:       timeStr,
-			Date:       today,
 			Recurrence: Daily,
 			Desc:       strip(text, loc[0:2]),
 		}, true

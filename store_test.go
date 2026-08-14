@@ -95,6 +95,32 @@ func TestDateGateFiring(t *testing.T) {
 	}
 }
 
+// TestRecurringCapturesFireBeyondCreationDay guards C1: a recurring capture
+// carries NO Date and must keep firing on later matching days, not just its
+// creation day. Defense-in-depth: even a stray Date on a non-Once task is
+// ignored by the firing gate (scoped to Once), so it can never zombie.
+func TestRecurringCapturesFireBeyondCreationDay(t *testing.T) {
+	// parseNow's Monday is 2026-01-05; a week later is also a Monday.
+	laterMonday := time.Date(2026, 1, 12, 9, 0, 0, 0, time.Local)
+	nextDay := time.Date(2026, 1, 6, 8, 30, 0, 0, time.Local)
+
+	weekdays := Task{Time: "09:00", Recurrence: Weekdays} // Date "" as the parser now emits
+	if !shouldFireTodayAt(weekdays, laterMonday) {
+		t.Fatal("undated Weekdays capture must fire on a later Monday, not just creation day")
+	}
+
+	daily := Task{Time: "08:30", Recurrence: Daily}
+	if !shouldFireTodayAt(daily, nextDay) {
+		t.Fatal("undated Daily capture must fire the next day")
+	}
+
+	// A stale Date on a recurring task must NOT pin it (Once-scoped gate).
+	staleDated := Task{Time: "09:00", Date: "2026-01-05", Recurrence: Weekdays}
+	if !shouldFireTodayAt(staleDated, laterMonday) {
+		t.Fatal("stray Date on a recurring task must be ignored by the firing gate")
+	}
+}
+
 // TestResetArchivesDatedOnceCorrectly guards Task 2's archive gate: a dated
 // once-task is not archived by a reset run on its Date (it survives until the
 // day after), while an undated once-task created before today archives as

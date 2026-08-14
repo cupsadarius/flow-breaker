@@ -58,8 +58,10 @@ func TestParseHeuristics(t *testing.T) {
 		{"mâine H:MM", "curs mâine 9:30", ParseResult{Time: "09:30", Date: tomorrow, Recurrence: Once, Desc: "curs"}, true},
 		{"maine no diacritic", "curs maine 9:30", ParseResult{Time: "09:30", Date: tomorrow, Recurrence: Once, Desc: "curs"}, true},
 		// ── recurring ──────────────────────────────────────────────────
-		{"every weekday at HH:MM", "standup every weekday at 09:30", ParseResult{Time: "09:30", Date: today, Recurrence: Weekdays, Desc: "standup"}, true},
-		{"în fiecare zi", "citește în fiecare zi la 20", ParseResult{Time: "20:00", Date: today, Recurrence: Daily, Desc: "citește"}, true},
+		// Recurring results carry NO Date — an empty Date means "every applicable
+		// recurrence day". A Date here would pin them to the creation day (C1).
+		{"every weekday at HH:MM", "standup every weekday at 09:30", ParseResult{Time: "09:30", Date: "", Recurrence: Weekdays, Desc: "standup"}, true},
+		{"în fiecare zi", "citește în fiecare zi la 20", ParseResult{Time: "20:00", Date: "", Recurrence: Daily, Desc: "citește"}, true},
 		// ── misses: AM/PM-ambiguous bare hours (1..11) → Haiku ──────────
 		{"bare 3 ambiguous", "call plumber at 3", ParseResult{}, false},
 		{"bare 8 ambiguous", "dinner at 8", ParseResult{}, false},
