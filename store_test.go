@@ -1,6 +1,41 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+// TestSaveAtomic guards the durable-write path: save() must produce a tasks.json
+// that round-trips via loadStore, and must leave no leftover *.tmp file behind
+// (a mid-write crash must never corrupt the sole durable copy).
+func TestSaveAtomic(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_BREAKER_DIR", dir)
+
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+	s.addTaskSource("09:00", "standup", Daily, nil, nil, "cli")
+
+	// tasks.json exists and round-trips.
+	if _, err := os.Stat(dataPath()); err != nil {
+		t.Fatalf("tasks.json not written: %v", err)
+	}
+	got := loadStore()
+	if len(got.Tasks) != 1 || got.Tasks[0].Desc != "standup" {
+		t.Fatalf("round-trip failed: %+v", got.Tasks)
+	}
+
+	// No leftover temp files in the data dir.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() == "tasks.json" {
+			continue
+		}
+		t.Fatalf("unexpected leftover file in data dir: %s", e.Name())
+	}
+}
 
 // TestLoadStoreDefaultsOnEmptyDir guards the fresh-deploy path: with no
 // tasks.json present, loadStore must still return working default settings

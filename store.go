@@ -118,10 +118,40 @@ func (s *Store) save() {
 	s.saveLocked()
 }
 
-// saveLocked persists the store; the caller must already hold s.mu.
+// saveLocked persists the store atomically; the caller must already hold s.mu.
+// It marshals, writes to a temp file in the SAME dir, fsyncs, then renames over
+// tasks.json — so a mid-write crash can never truncate or corrupt the sole
+// durable copy. On any error the temp file is cleaned up and no partial
+// tasks.json is left behind.
 func (s *Store) saveLocked() {
-	data, _ := json.MarshalIndent(s, "", "  ")
-	os.WriteFile(dataPath(), data, 0o644)
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return
+	}
+	dir := dataDir()
+	f, err := os.CreateTemp(dir, "tasks.json.*.tmp")
+	if err != nil {
+		return
+	}
+	tmp := f.Name()
+	// Best-effort cleanup: harmless no-op after a successful rename.
+	defer os.Remove(tmp)
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return
+	}
+	if err := f.Close(); err != nil {
+		return
+	}
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return
+	}
+	os.Rename(tmp, dataPath())
 }
 
 func (s *Store) addTask(timeStr, desc string, rec Recurrence, tags, days []string) Task {
