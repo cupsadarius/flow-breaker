@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -97,6 +98,13 @@ func loadStore() *Store {
 	// working settings — otherwise a brand-new daemon would serve GET /settings
 	// with all alerts off and SnoozeMins:0. A present file overrides these.
 	s := &Store{NextID: 1, Settings: defaultSettings()}
+	// Sweep temp files orphaned by a hard crash between CreateTemp and Rename in
+	// saveLocked, so they don't accumulate. Best-effort.
+	if matches, err := filepath.Glob(filepath.Join(dataDir(), "tasks.json.*.tmp")); err == nil {
+		for _, m := range matches {
+			os.Remove(m)
+		}
+	}
 	data, err := os.ReadFile(dataPath())
 	if err != nil {
 		return s
@@ -126,11 +134,13 @@ func (s *Store) save() {
 func (s *Store) saveLocked() {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
+		log.Printf("flow-breaker: save failed (marshal): %v", err)
 		return
 	}
 	dir := dataDir()
 	f, err := os.CreateTemp(dir, "tasks.json.*.tmp")
 	if err != nil {
+		log.Printf("flow-breaker: save failed (create temp): %v", err)
 		return
 	}
 	tmp := f.Name()
@@ -139,19 +149,37 @@ func (s *Store) saveLocked() {
 
 	if _, err := f.Write(data); err != nil {
 		f.Close()
+		log.Printf("flow-breaker: save failed (write %s): %v", tmp, err)
 		return
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
+		log.Printf("flow-breaker: save failed (fsync %s): %v", tmp, err)
 		return
 	}
 	if err := f.Close(); err != nil {
+		log.Printf("flow-breaker: save failed (close %s): %v", tmp, err)
 		return
 	}
 	if err := os.Chmod(tmp, 0o644); err != nil {
+		log.Printf("flow-breaker: save failed (chmod %s): %v", tmp, err)
 		return
 	}
-	os.Rename(tmp, dataPath())
+	if err := os.Rename(tmp, dataPath()); err != nil {
+		log.Printf("flow-breaker: save failed (rename %s): %v", tmp, err)
+		return
+	}
+	// fsync the parent dir so the rename's directory entry is durable across a
+	// power loss (otherwise the fsync'd data file may be lost, showing the OLD
+	// tasks.json despite a "successful" save). Best-effort.
+	if d, err := os.Open(dir); err != nil {
+		log.Printf("flow-breaker: save warning (open dir %s): %v", dir, err)
+	} else {
+		if err := d.Sync(); err != nil {
+			log.Printf("flow-breaker: save warning (fsync dir %s): %v", dir, err)
+		}
+		d.Close()
+	}
 }
 
 func (s *Store) addTask(timeStr, desc string, rec Recurrence, tags, days []string) Task {

@@ -1,5 +1,6 @@
 BINARY := flow-breaker
-PI_HOST ?= pi          # ssh host alias; override: make deploy PI_HOST=user@host
+# ssh host alias; override: make deploy PI_HOST=user@host
+PI_HOST ?= pi
 
 .PHONY: build build-arm64 deploy test
 
