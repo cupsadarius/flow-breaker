@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -25,7 +26,7 @@ func TestSendTelegram(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := sendTelegram(srv.Client(), srv.URL, "TOKEN123", "999", "hello there")
+	err := sendTelegram(context.Background(), srv.Client(), srv.URL, "TOKEN123", "999", "hello there")
 	if err != nil {
 		t.Fatalf("sendTelegram returned error: %v", err)
 	}
@@ -50,7 +51,7 @@ func TestSendTelegram403(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := sendTelegram(srv.Client(), srv.URL, "TOKEN", "999", "hi")
+	err := sendTelegram(context.Background(), srv.Client(), srv.URL, "TOKEN", "999", "hi")
 	if err == nil {
 		t.Fatal("expected error on 403, got nil")
 	}
@@ -66,7 +67,7 @@ func TestSendTelegramNon2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := sendTelegram(srv.Client(), srv.URL, "TOKEN", "999", "hi")
+	err := sendTelegram(context.Background(), srv.Client(), srv.URL, "TOKEN", "999", "hi")
 	if err == nil {
 		t.Fatal("expected error on 400, got nil")
 	}

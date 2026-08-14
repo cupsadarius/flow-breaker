@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,10 +15,11 @@ import (
 // POST {baseURL}/bot{token}/sendMessage with a JSON {chat_id, text} body. The
 // caller supplies the *http.Client and baseURL so tests can point at an
 // httptest.Server (baseURL defaults to https://api.telegram.org in production
-// via telegramConfig). A 403 — Telegram's response when the user has never
-// /start-ed the bot (or has blocked it) — yields a clear, actionable error;
-// any other non-2xx yields an error carrying the status and response body.
-func sendTelegram(client *http.Client, baseURL, token, chatID, text string) error {
+// via telegramConfig). ctx carries the per-attempt deadline (6B sets it). A
+// 403 — Telegram's response when the user has never /start-ed the bot (or has
+// blocked it) — yields a clear, actionable error; any other non-2xx yields an
+// error carrying the status and (bounded) response body.
+func sendTelegram(ctx context.Context, client *http.Client, baseURL, token, chatID, text string) error {
 	payload, err := json.Marshal(map[string]string{
 		"chat_id": chatID,
 		"text":    text,
@@ -26,7 +28,7 @@ func sendTelegram(client *http.Client, baseURL, token, chatID, text string) erro
 		return err
 	}
 	url := strings.TrimRight(baseURL, "/") + "/bot" + token + "/sendMessage"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -42,9 +44,10 @@ func sendTelegram(client *http.Client, baseURL, token, chatID, text string) erro
 		return fmt.Errorf("telegram: bot can't message user (send /start to the bot once)")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return fmt.Errorf("telegram send: status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
+	drainClose(resp)
 	return nil
 }
 

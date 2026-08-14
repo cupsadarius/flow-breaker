@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +26,7 @@ func TestPublishNtfy(t *testing.T) {
 		{Label: "Done", URL: "https://pi.example/task/42/done"},
 		{Label: "Snooze", URL: "https://pi.example/task/42/snooze"},
 	}
-	err := publishNtfy(srv.Client(), srv.URL, "flow", "Standup", "time to standup", 4, actions)
+	err := publishNtfy(context.Background(), srv.Client(), srv.URL, "flow", "Standup", "time to standup", 4, actions)
 	if err != nil {
 		t.Fatalf("publishNtfy returned error: %v", err)
 	}
@@ -67,7 +68,7 @@ func TestPublishNtfyNoActions(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := publishNtfy(srv.Client(), srv.URL, "flow", "t", "b", 3, nil); err != nil {
+	if err := publishNtfy(context.Background(), srv.Client(), srv.URL, "flow", "t", "b", 3, nil); err != nil {
 		t.Fatalf("publishNtfy returned error: %v", err)
 	}
 	if !seen {
@@ -78,6 +79,22 @@ func TestPublishNtfyNoActions(t *testing.T) {
 	}
 }
 
+func TestPublishNtfyZeroPriority(t *testing.T) {
+	var hasHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hasHeader = r.Header["X-Priority"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := publishNtfy(context.Background(), srv.Client(), srv.URL, "flow", "t", "b", 0, nil); err != nil {
+		t.Fatalf("publishNtfy returned error: %v", err)
+	}
+	if hasHeader {
+		t.Error("X-Priority header should be omitted when priority == 0")
+	}
+}
+
 func TestPublishNtfyNon2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -85,7 +102,7 @@ func TestPublishNtfyNon2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := publishNtfy(srv.Client(), srv.URL, "flow", "t", "b", 3, nil)
+	err := publishNtfy(context.Background(), srv.Client(), srv.URL, "flow", "t", "b", 3, nil)
 	if err == nil {
 		t.Fatal("expected error on 500, got nil")
 	}

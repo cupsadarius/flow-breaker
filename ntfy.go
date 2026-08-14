@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,20 +20,27 @@ type NtfyAction struct {
 
 // publishNtfy posts a message to {baseURL}/{topic} using ntfy's HTTP publish
 // API: the message is the request body, and metadata rides on headers —
-// X-Title, X-Priority (1-5), and X-Actions (one http action per button, joined
-// with ';'). The caller supplies the *http.Client and baseURL so tests can
-// point at an httptest.Server (no global client, no real network). A non-2xx
-// response yields an error carrying the status and response body.
-func publishNtfy(client *http.Client, baseURL, topic, title, body string, priority int, actions []NtfyAction) error {
+// X-Title, X-Priority, and X-Actions (one http action per button, joined
+// with ';'). priority follows ntfy's 1–5 contract; the zero value is treated as
+// "unset" and no X-Priority header is sent (ntfy then applies its default 3).
+// The caller supplies the *http.Client and baseURL so tests can point at an
+// httptest.Server (no global client, no real network). ctx carries the
+// per-attempt deadline (6B sets it). A non-2xx response yields an error carrying
+// the status and (bounded) response body.
+func publishNtfy(ctx context.Context, client *http.Client, baseURL, topic, title, body string, priority int, actions []NtfyAction) error {
 	url := strings.TrimRight(baseURL, "/") + "/" + topic
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		return err
 	}
 	if title != "" {
 		req.Header.Set("X-Title", title)
 	}
-	req.Header.Set("X-Priority", strconv.Itoa(priority))
+	// ntfy's valid priority range is 1–5; a 0 (int zero value) is invalid, so
+	// omit the header entirely and let ntfy apply its default.
+	if priority != 0 {
+		req.Header.Set("X-Priority", strconv.Itoa(priority))
+	}
 	if len(actions) > 0 {
 		req.Header.Set("X-Actions", encodeNtfyActions(actions))
 	}
@@ -44,20 +52,32 @@ func publishNtfy(client *http.Client, baseURL, topic, title, body string, priori
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return fmt.Errorf("ntfy publish: status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
+	drainClose(resp)
 	return nil
 }
 
 // encodeNtfyActions renders each action as an ntfy "http" action that POSTs to
-// its URL, joining multiple actions with ';'.
+// its URL, joining multiple actions with ';'. Uses ntfy's short header format,
+// which is comma/semicolon-delimited: action URLs must contain neither ',' nor
+// ';'. The fixed .../task/{id}/done|snooze targets are safe; if a query string
+// carrying ',' or ';' is ever added, switch to ntfy's JSON action format.
 func encodeNtfyActions(actions []NtfyAction) string {
 	parts := make([]string, 0, len(actions))
 	for _, a := range actions {
 		parts = append(parts, fmt.Sprintf("action=http, label=%s, url=%s, method=POST", a.Label, a.URL))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// drainClose drains any unread response body before closing it, so Go's HTTP
+// transport can reuse the keep-alive connection instead of discarding it. Used
+// on the success path where the body is otherwise ignored.
+func drainClose(resp *http.Response) {
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }
 
 // ntfyConfig reads the ntfy server base URL and topic from the environment.
