@@ -13,9 +13,11 @@ title="${title:-flow-breaker}"
 body="${message}"
 
 # osascript takes AppleScript string literals; escape backslashes and quotes so a
-# message containing either can't break out of the string.
+# message containing either can't break out of the string, and flatten CR/LF to
+# spaces — a raw newline makes AppleScript reject the literal and the banner is
+# silently lost.
 esc() {
-	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+	printf '%s' "$1" | tr '\r\n' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 # 1. Native notification (banner + Glass sound) — mirrors macNotify.

@@ -39,6 +39,12 @@ type CalendarFeed struct {
 	Label string `json:"label"`
 }
 
+// selfCalEmail is the user's own calendar address, used to self-scope the
+// DECLINED heuristic. Empty (unconfigured) disables declined-filtering entirely.
+func selfCalEmail() string {
+	return strings.ToLower(strings.TrimSpace(os.Getenv("FLOW_BREAKER_CAL_EMAIL")))
+}
+
 func feedsPath() string { return filepath.Join(dataDir(), "calendar_feeds.json") }
 func cachePath() string { return filepath.Join(dataDir(), "calendar_cache.json") }
 
@@ -270,9 +276,16 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 			continue
 		}
 
-		// Best-effort single-user declined heuristic: any PARTSTAT=DECLINED line
-		// (typically on an ATTENDEE param) means the user declined this event.
-		if strings.Contains(line, "PARTSTAT=DECLINED") {
+		// Declined heuristic, self-scoped: only YOUR decline drops the event. A
+		// DECLINED partstat on a colleague's ATTENDEE line must NOT suppress an
+		// alarm you still plan to attend. So require the line to be an ATTENDEE
+		// line carrying PARTSTAT=DECLINED for your own address (case-insensitive).
+		// When FLOW_BREAKER_CAL_EMAIL is unset we can't identify "you", so we never
+		// mark Declined — better to over-alarm than silently miss.
+		if self := selfCalEmail(); self != "" &&
+			strings.HasPrefix(line, "ATTENDEE") &&
+			strings.Contains(line, "PARTSTAT=DECLINED") &&
+			strings.Contains(strings.ToLower(line), self) {
 			declined = true
 		}
 

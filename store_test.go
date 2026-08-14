@@ -178,10 +178,17 @@ func TestMaterializeCalendarNewEvent(t *testing.T) {
 		t.Fatalf("bad materialized task: %+v", got)
 	}
 
-	// Underflow: a 00:05 event's 10-min lead wraps to the previous day.
+	// Cross-midnight clamp: a 00:05 event's 10-min lead would land on the
+	// previous day (23:55) as instantly-missed, so it clamps to event time on
+	// now's date instead.
 	ts, ds, ok := calendarAlarmTime("00:05", now)
-	if !ok || ts != "23:55" || ds != "2026-08-13" {
-		t.Fatalf("underflow alarm = %q/%q ok=%v, want 23:55/2026-08-13", ts, ds, ok)
+	if !ok || ts != "00:05" || ds != "2026-08-14" {
+		t.Fatalf("clamped alarm = %q/%q ok=%v, want 00:05/2026-08-14", ts, ds, ok)
+	}
+	// A normal event well after midnight keeps its full 10-min lead.
+	ts, ds, ok = calendarAlarmTime("00:20", now)
+	if !ok || ts != "00:10" || ds != "2026-08-14" {
+		t.Fatalf("00:20 lead = %q/%q ok=%v, want 00:10/2026-08-14", ts, ds, ok)
 	}
 }
 
@@ -194,8 +201,10 @@ func TestMaterializeCalendarUpsertPreservesAck(t *testing.T) {
 	s := &Store{NextID: 1, Settings: defaultSettings()}
 
 	s.materializeCalendar([]CalendarEvent{calEvent("u1", "Standup", "09:00")}, now)
-	// Simulate a snooze on the materialized task.
+	// Simulate ack state on the materialized task.
 	s.Tasks[0].Snoozed = 12345
+	s.Tasks[0].Dismissed = true
+	s.Tasks[0].Missed = true
 	id := s.Tasks[0].ID
 
 	added, updated, dropped := s.materializeCalendar([]CalendarEvent{calEvent("u1", "Standup", "10:00")}, now)
@@ -212,8 +221,8 @@ func TestMaterializeCalendarUpsertPreservesAck(t *testing.T) {
 	if got.Time != "09:50" {
 		t.Fatalf("moved-time upsert Time = %q, want 09:50", got.Time)
 	}
-	if got.Snoozed != 12345 {
-		t.Fatalf("upsert must preserve Snoozed ack state, got %d", got.Snoozed)
+	if got.Snoozed != 12345 || !got.Dismissed || !got.Missed {
+		t.Fatalf("upsert must preserve Snoozed/Dismissed/Missed ack state, got %+v", got)
 	}
 }
 
@@ -315,6 +324,70 @@ func TestResetDailyTreatsCalendarLikeAny(t *testing.T) {
 	}
 	if got.Snoozed != 0 || got.Missed {
 		t.Fatalf("reset must clear per-day flags on a calendar task: %+v", got)
+	}
+}
+
+// TestMaterializeCalendarSpareNonCalendarTasks guards the reconcile scope: only
+// Source "calendar" tasks are eligible for the vanished-drop. A regular task
+// absent from the feed must never be deleted.
+func TestMaterializeCalendarSpareNonCalendarTasks(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+	s.addTaskSource("07:00", "", "manual task", Once, nil, nil, "tui")
+
+	// Feed is empty — nothing calendar exists, so nothing to drop.
+	added, updated, dropped := s.materializeCalendar(nil, now)
+	if added != 0 || updated != 0 || dropped != 0 {
+		t.Fatalf("counts = (%d,%d,%d), want (0,0,0)", added, updated, dropped)
+	}
+	if len(s.Tasks) != 1 || s.Tasks[0].Source != "tui" {
+		t.Fatalf("non-calendar task must survive reconcile: %+v", s.Tasks)
+	}
+}
+
+// TestMaterializeCalendarOutOfOrderRematch guards the match-by-value invariant:
+// upsert keys on CalUID (a value), not a stored index, so a later batch whose
+// events sort into a different order still re-matches existing tasks by UID
+// after sortTasks reorders — no duplicates, no cross-wiring.
+func TestMaterializeCalendarOutOfOrderRematch(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+
+	// First batch: uA at 09:00, uB at 15:00 (sorted A before B by Time).
+	s.materializeCalendar([]CalendarEvent{
+		calEvent("uA", "Alpha", "09:00"),
+		calEvent("uB", "Bravo", "15:00"),
+	}, now)
+	if len(s.Tasks) != 2 {
+		t.Fatalf("want 2 tasks after first batch, got %d", len(s.Tasks))
+	}
+
+	// Second batch, out of order and with swapped-around times that force a
+	// re-sort: uB now at 08:00 (sorts first), uA now at 20:00 (sorts last).
+	added, updated, dropped := s.materializeCalendar([]CalendarEvent{
+		calEvent("uB", "Bravo", "08:00"),
+		calEvent("uA", "Alpha", "20:00"),
+	}, now)
+	if added != 0 || dropped != 0 {
+		t.Fatalf("re-match must not add or drop: added=%d dropped=%d", added, dropped)
+	}
+	if updated != 2 {
+		t.Fatalf("both tasks moved time, want updated=2, got %d", updated)
+	}
+	if len(s.Tasks) != 2 {
+		t.Fatalf("re-match must not duplicate: got %d tasks", len(s.Tasks))
+	}
+	byUID := map[string]Task{}
+	for _, tk := range s.Tasks {
+		byUID[tk.CalUID] = tk
+	}
+	if byUID["uB"].Time != "07:50" || byUID["uB"].Desc != "Bravo" {
+		t.Fatalf("uB mis-wired after re-sort: %+v", byUID["uB"])
+	}
+	if byUID["uA"].Time != "19:50" || byUID["uA"].Desc != "Alpha" {
+		t.Fatalf("uA mis-wired after re-sort: %+v", byUID["uA"])
 	}
 }
 

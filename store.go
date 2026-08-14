@@ -485,9 +485,11 @@ func (s *Store) importCalendarEvents(events []CalendarEvent) []Task {
 
 // calendarAlarmTime computes a materialized calendar task's Time/Date from an
 // event's "HH:MM" start, applying the fixed 10-minute lead. It resolves the
-// start against now's date, subtracts 10m, and re-formats — so an underflow
-// below 00:00 (e.g. a 00:05 event) correctly wraps to the previous day's Date
-// and a 23:xx Time. Returns ok=false if start is not parseable as HH:MM.
+// start against now's date and subtracts 10m. If that lead would cross to the
+// day BEFORE now's date (e.g. a 00:05 event → yesterday 23:55, which would
+// surface as instantly past-missed), it clamps to the event start on now's date
+// with no lead — so the alarm fires at event time rather than as already-overdue.
+// Returns ok=false if start is not parseable as HH:MM.
 func calendarAlarmTime(start string, now time.Time) (timeStr, dateStr string, ok bool) {
 	t, err := time.Parse("15:04", start)
 	if err != nil {
@@ -495,6 +497,11 @@ func calendarAlarmTime(start string, now time.Time) (timeStr, dateStr string, ok
 	}
 	base := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
 	alarm := base.Add(-10 * time.Minute)
+	// Clamp a cross-midnight lead back to the event start (no lead) so it never
+	// materializes onto the previous day as an immediately-missed alarm.
+	if alarm.Day() != base.Day() {
+		alarm = base
+	}
 	return alarm.Format("15:04"), alarm.Format("2006-01-02"), true
 }
 
@@ -523,11 +530,14 @@ func (s *Store) materializeCalendar(events []CalendarEvent, now time.Time) (adde
 		if ev.AllDay || ev.Declined || ev.StartTime == "" || ev.UID == "" {
 			continue
 		}
+		// Mark eligible BEFORE the parse-failure guard so a transient
+		// calendarAlarmTime failure never reconcile-deletes an existing un-acted
+		// calendar task for a UID still present in the feed.
+		eligible[ev.UID] = true
 		timeStr, dateStr, ok := calendarAlarmTime(ev.StartTime, now)
 		if !ok {
 			continue
 		}
-		eligible[ev.UID] = true
 
 		idx := -1
 		for i := range s.Tasks {

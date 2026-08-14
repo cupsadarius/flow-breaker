@@ -29,9 +29,16 @@ the box until `tailscale serve` fronts it (step 6). The `EnvironmentFile`
 
    ```sh
    mkdir -p ~/.config/flow-breaker && \
-     printf 'ANTHROPIC_API_KEY=sk-...\n' > ~/.config/flow-breaker/env && \
+     printf 'ANTHROPIC_API_KEY=sk-...\nFLOW_BREAKER_CAL_EMAIL=you@example.com\n' > ~/.config/flow-breaker/env && \
      chmod 600 ~/.config/flow-breaker/env
    ```
+
+   `FLOW_BREAKER_CAL_EMAIL` is your own calendar address. It self-scopes the
+   calendar **declined** filter: an event is dropped only when the
+   `PARTSTAT=DECLINED` is on *your* attendee line, so a colleague declining a
+   meeting you still plan to attend never suppresses your alarm. **Leave it unset
+   and declined-filtering is disabled entirely** — every timed event materializes
+   (over-alarm rather than silently miss).
 
 4. **Install and enable the unit** (the repo must be checked out on the Pi, or
    copy `deploy/flow-breakerd.service` over):
