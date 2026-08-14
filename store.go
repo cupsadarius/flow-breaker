@@ -44,6 +44,9 @@ type Task struct {
 	// Source records who created/last-mutated the task. One of:
 	// tui/cli/ntfy/claude-code/opencode/codex/phone/api/calendar.
 	Source string `json:"source,omitempty"`
+	// CalUID links a materialized calendar task back to its source iCal event
+	// (CalendarEvent.UID). It is the upsert key for materializeCalendar.
+	CalUID string `json:"cal_uid,omitempty"`
 }
 
 type Settings struct {
@@ -478,6 +481,111 @@ func (s *Store) importCalendarEvents(events []CalendarEvent) []Task {
 		imported = append(imported, t)
 	}
 	return imported
+}
+
+// calendarAlarmTime computes a materialized calendar task's Time/Date from an
+// event's "HH:MM" start, applying the fixed 10-minute lead. It resolves the
+// start against now's date, subtracts 10m, and re-formats — so an underflow
+// below 00:00 (e.g. a 00:05 event) correctly wraps to the previous day's Date
+// and a 23:xx Time. Returns ok=false if start is not parseable as HH:MM.
+func calendarAlarmTime(start string, now time.Time) (timeStr, dateStr string, ok bool) {
+	t, err := time.Parse("15:04", start)
+	if err != nil {
+		return "", "", false
+	}
+	base := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+	alarm := base.Add(-10 * time.Minute)
+	return alarm.Format("15:04"), alarm.Format("2006-01-02"), true
+}
+
+// materializeCalendar upserts today's eligible timed calendar events into
+// s.Tasks as ordinary Once tasks (Source "calendar", CalUID = event UID) so they
+// flow through the normal firing/escalation/ack pipeline. It locks once and
+// persists via saveLocked; because it holds the write lock, the add path is
+// inlined rather than calling addTaskSource (which would re-lock and deadlock).
+//
+// Rules:
+//   - Eligible = !AllDay && !Declined && StartTime != "" (and a non-empty UID to
+//     upsert against). Others are skipped.
+//   - Upsert by CalUID: an existing task with CalUID == ev.UID has its Time/Date/
+//     Desc refreshed if changed (counts as updated); its Done/Snoozed/Missed/
+//     Dismissed ack state is PRESERVED (a Done calendar task is a tombstone — it
+//     stays Done and never re-surfaces). A new UID is appended (counts as added).
+//   - Reconcile: a Source "calendar" task whose CalUID vanished from the eligible
+//     set is deleted if un-acted (!Done, counts as dropped); a Done one is kept
+//     (harmless — the daily reset archives it).
+func (s *Store) materializeCalendar(events []CalendarEvent, now time.Time) (added, updated, dropped int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	eligible := make(map[string]bool)
+	for _, ev := range events {
+		if ev.AllDay || ev.Declined || ev.StartTime == "" || ev.UID == "" {
+			continue
+		}
+		timeStr, dateStr, ok := calendarAlarmTime(ev.StartTime, now)
+		if !ok {
+			continue
+		}
+		eligible[ev.UID] = true
+
+		idx := -1
+		for i := range s.Tasks {
+			if s.Tasks[i].CalUID == ev.UID {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			changed := false
+			if s.Tasks[idx].Time != timeStr {
+				s.Tasks[idx].Time = timeStr
+				changed = true
+			}
+			if s.Tasks[idx].Date != dateStr {
+				s.Tasks[idx].Date = dateStr
+				changed = true
+			}
+			if s.Tasks[idx].Desc != ev.Summary {
+				s.Tasks[idx].Desc = ev.Summary
+				changed = true
+			}
+			if changed {
+				updated++
+			}
+			// Ack state (Done/Snoozed/Missed/Dismissed) is deliberately preserved.
+			continue
+		}
+		s.Tasks = append(s.Tasks, Task{
+			ID:         s.NextID,
+			Time:       timeStr,
+			Date:       dateStr,
+			Desc:       ev.Summary,
+			Recurrence: Once,
+			CreatedAt:  now.Format(time.RFC3339),
+			Source:     "calendar",
+			CalUID:     ev.UID,
+		})
+		s.NextID++
+		added++
+	}
+
+	// Reconcile vanished calendar tasks: drop un-acted ones, keep Done tombstones.
+	var remaining []Task
+	for _, t := range s.Tasks {
+		if t.Source == "calendar" && t.CalUID != "" && !eligible[t.CalUID] {
+			if !t.Done {
+				dropped++
+				continue
+			}
+		}
+		remaining = append(remaining, t)
+	}
+	s.Tasks = remaining
+
+	s.sortTasks()
+	s.saveLocked()
+	return added, updated, dropped
 }
 
 func hasTag(tags []string, tag string) bool {

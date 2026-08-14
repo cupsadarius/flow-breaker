@@ -65,6 +65,34 @@ _Deferred: hands-free (Tasker + AutoVoice). Don't start there — tap-and-speak 
 - [ ] `alert-handler.sh` pipes each message into the existing v1 `osascript` / `say` / `afplay` code — all six v1 alert types survive unmodified, just triggered by subscription instead of the local ticker.
 - [ ] TUI is now a viewer; the Mac keeps its mouth.
 
+### The handler script (`deploy/alert-handler.sh`)
+
+Shipped in the repo, `chmod +x`, POSIX `/bin/sh`. ntfy hands it each message via the
+environment (`$message`, `$title`, `$priority`); the script fires the three macOS
+push alerts, mirroring `alert.go` exactly:
+
+- `osascript -e 'display notification …'` → `macNotify` (banner + Glass sound)
+- `say -v Samantha -r 200` → `macSay`
+- `afplay /System/Library/Sounds/Funk.aiff` → `macSound("Funk")`
+
+`$message`/`$title` are escaped (backslash + double-quote) before being spliced into
+the AppleScript literal, so an alarm body containing quotes can't break out.
+
+The six v1 alert types survive the move to push: notification, speech, and sound
+are reproduced here; the dialog (`display alert` with Snooze/Done/Dismiss) and the
+terminal bell / tmux flash remain in the local TUI, which is now a viewer alongside
+the push path (Android/Telegram carry the actionable Done/Snooze buttons).
+
+### Daemonize via launchd
+
+Wrap the subscribe in a LaunchAgent (`~/Library/LaunchAgents/ai.optura.flow-breaker.alerts.plist`)
+so it runs at login and restarts on crash:
+
+- `ProgramArguments`: `/opt/homebrew/bin/ntfy subscribe https://<machine>.<tailnet>.ts.net/flow --exec /path/to/alert-handler.sh`
+- `RunAtLoad: true`, `KeepAlive: true`.
+- `launchctl load ~/Library/LaunchAgents/ai.optura.flow-breaker.alerts.plist`.
+- Verify: publish a test message to topic `flow` → Mac speaks + banners.
+
 ---
 
 ## Fail-loud / off-tailnet fallback (capture)

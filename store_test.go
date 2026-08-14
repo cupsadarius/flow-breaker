@@ -150,6 +150,174 @@ func TestResetArchivesDatedOnceCorrectly(t *testing.T) {
 	}
 }
 
+// calEvent is a tiny helper for building an eligible timed CalendarEvent.
+func calEvent(uid, summary, start string) CalendarEvent {
+	return CalendarEvent{UID: uid, Summary: summary, StartTime: start}
+}
+
+// TestMaterializeCalendarNewEvent guards Task 2: a new eligible event becomes a
+// single Once task at start−10m, Source "calendar", CalUID set. The alarm-time
+// underflow case (00:05 → previous day 23:55) is checked too.
+func TestMaterializeCalendarNewEvent(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+
+	added, updated, dropped := s.materializeCalendar([]CalendarEvent{calEvent("u1", "Standup", "09:00")}, now)
+	if added != 1 || updated != 0 || dropped != 0 {
+		t.Fatalf("counts = (%d,%d,%d), want (1,0,0)", added, updated, dropped)
+	}
+	if len(s.Tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(s.Tasks))
+	}
+	got := s.Tasks[0]
+	if got.Time != "08:50" || got.Date != "2026-08-14" {
+		t.Fatalf("alarm time/date = %q/%q, want 08:50/2026-08-14", got.Time, got.Date)
+	}
+	if got.Source != "calendar" || got.CalUID != "u1" || got.Recurrence != Once {
+		t.Fatalf("bad materialized task: %+v", got)
+	}
+
+	// Underflow: a 00:05 event's 10-min lead wraps to the previous day.
+	ts, ds, ok := calendarAlarmTime("00:05", now)
+	if !ok || ts != "23:55" || ds != "2026-08-13" {
+		t.Fatalf("underflow alarm = %q/%q ok=%v, want 23:55/2026-08-13", ts, ds, ok)
+	}
+}
+
+// TestMaterializeCalendarUpsertPreservesAck guards Task 2's upsert: the same UID
+// with a moved start updates Time in place (still one task) while preserving the
+// task's Done/Snoozed ack state.
+func TestMaterializeCalendarUpsertPreservesAck(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+
+	s.materializeCalendar([]CalendarEvent{calEvent("u1", "Standup", "09:00")}, now)
+	// Simulate a snooze on the materialized task.
+	s.Tasks[0].Snoozed = 12345
+	id := s.Tasks[0].ID
+
+	added, updated, dropped := s.materializeCalendar([]CalendarEvent{calEvent("u1", "Standup", "10:00")}, now)
+	if added != 0 || updated != 1 || dropped != 0 {
+		t.Fatalf("counts = (%d,%d,%d), want (0,1,0)", added, updated, dropped)
+	}
+	if len(s.Tasks) != 1 {
+		t.Fatalf("upsert must not duplicate: got %d tasks", len(s.Tasks))
+	}
+	got := s.Tasks[0]
+	if got.ID != id {
+		t.Fatalf("upsert must reuse the same task id: was %d now %d", id, got.ID)
+	}
+	if got.Time != "09:50" {
+		t.Fatalf("moved-time upsert Time = %q, want 09:50", got.Time)
+	}
+	if got.Snoozed != 12345 {
+		t.Fatalf("upsert must preserve Snoozed ack state, got %d", got.Snoozed)
+	}
+}
+
+// TestMaterializeCalendarSkipsIneligible guards Task 2: declined, all-day, and
+// no-start events are never materialized.
+func TestMaterializeCalendarSkipsIneligible(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+
+	events := []CalendarEvent{
+		{UID: "d1", Summary: "Declined", StartTime: "09:00", Declined: true},
+		{UID: "a1", Summary: "All day", AllDay: true},
+		{UID: "n1", Summary: "No start"},
+	}
+	added, updated, dropped := s.materializeCalendar(events, now)
+	if added != 0 || updated != 0 || dropped != 0 {
+		t.Fatalf("counts = (%d,%d,%d), want (0,0,0)", added, updated, dropped)
+	}
+	if len(s.Tasks) != 0 {
+		t.Fatalf("ineligible events must not materialize, got %d tasks", len(s.Tasks))
+	}
+}
+
+// TestMaterializeCalendarReconcileVanished guards Task 2's reconcile: an un-acted
+// calendar task whose UID vanished from the feed is dropped; a Done one is kept.
+func TestMaterializeCalendarReconcileVanished(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+
+	// Seed two materialized calendar tasks.
+	s.materializeCalendar([]CalendarEvent{
+		calEvent("keep-done", "Kept", "09:00"),
+		calEvent("drop-me", "Dropped", "10:00"),
+	}, now)
+	// Ack the first one.
+	for i := range s.Tasks {
+		if s.Tasks[i].CalUID == "keep-done" {
+			s.Tasks[i].Done = true
+		}
+	}
+
+	// Feed now contains neither UID.
+	added, updated, dropped := s.materializeCalendar(nil, now)
+	if added != 0 || updated != 0 || dropped != 1 {
+		t.Fatalf("counts = (%d,%d,%d), want (0,0,1)", added, updated, dropped)
+	}
+	if len(s.Tasks) != 1 {
+		t.Fatalf("want 1 surviving task (the Done tombstone), got %d", len(s.Tasks))
+	}
+	if s.Tasks[0].CalUID != "keep-done" || !s.Tasks[0].Done {
+		t.Fatalf("Done tombstone must survive vanish: %+v", s.Tasks[0])
+	}
+}
+
+// TestMaterializeCalendarDoneTombstone guards Task 2: a Done calendar task whose
+// UID is still in the feed stays Done and is not re-surfaced (no new task, ack
+// preserved).
+func TestMaterializeCalendarDoneTombstone(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+
+	s.materializeCalendar([]CalendarEvent{calEvent("u1", "Standup", "09:00")}, now)
+	s.Tasks[0].Done = true
+
+	added, _, dropped := s.materializeCalendar([]CalendarEvent{calEvent("u1", "Standup", "09:00")}, now)
+	if added != 0 || dropped != 0 {
+		t.Fatalf("re-materialize of a Done event must not add/drop: (%d,_,%d)", added, dropped)
+	}
+	if len(s.Tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(s.Tasks))
+	}
+	if !s.Tasks[0].Done {
+		t.Fatal("Done calendar task must stay Done when its UID is re-materialized")
+	}
+}
+
+// TestResetDailyTreatsCalendarLikeAny guards Task 2: calendar tasks need no
+// special-casing in resetDaily — an un-acted dated once calendar task clears its
+// per-day flags like any task.
+func TestResetDailyTreatsCalendarLikeAny(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	s := &Store{NextID: 1, Settings: defaultSettings(), LastReset: now.AddDate(0, 0, -1).Format("2006-01-02")}
+	s.Tasks = append(s.Tasks, Task{
+		ID: 1, Time: "08:50", Date: today, Desc: "Standup", Recurrence: Once,
+		Source: "calendar", CalUID: "u1", Snoozed: 999, Missed: true,
+		CreatedAt: now.Format(time.RFC3339),
+	})
+
+	s.resetDaily()
+
+	got := s.Tasks[0]
+	if got.Archived {
+		t.Fatal("a calendar task dated today must not archive on reset")
+	}
+	if got.Snoozed != 0 || got.Missed {
+		t.Fatalf("reset must clear per-day flags on a calendar task: %+v", got)
+	}
+}
+
 func TestFindTaskByID(t *testing.T) {
 	s := &Store{Tasks: []Task{{ID: 1}, {ID: 7}}, NextID: 8}
 	if _, err := s.findTaskByID(7); err != nil {

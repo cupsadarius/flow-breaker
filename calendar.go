@@ -16,11 +16,16 @@ import (
 
 type CalendarEvent struct {
 	ID           string `json:"id"`
+	UID          string `json:"uid"`
 	Summary      string `json:"summary"`
 	StartTime    string `json:"start_time"`
 	EndTime      string `json:"end_time"`
 	CalendarName string `json:"calendar_name"`
 	AllDay       bool   `json:"all_day"`
+	// Declined is a best-effort single-user heuristic: this is a personal
+	// secret-URL calendar, so any PARTSTAT=DECLINED line in the event means the
+	// user declined it. Declined events are never materialized as alarms.
+	Declined bool `json:"declined"`
 }
 
 type CalendarCache struct {
@@ -189,7 +194,7 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 	var events []CalendarEvent
 	inEvent := false
 	var uid, summary, dtStartRaw, dtStartTZID, dtEndRaw, dtEndTZID string
-	var dtStartIsDate bool
+	var dtStartIsDate, declined bool
 
 	for _, line := range lines {
 		if line == "BEGIN:VEVENT" {
@@ -197,6 +202,7 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 			uid, summary = "", ""
 			dtStartRaw, dtStartTZID, dtEndRaw, dtEndTZID = "", "", "", ""
 			dtStartIsDate = false
+			declined = false
 			continue
 		}
 		if line == "END:VEVENT" {
@@ -224,9 +230,11 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 						}
 						events = append(events, CalendarEvent{
 							ID:           uid,
+							UID:          uid,
 							Summary:      summary,
 							CalendarName: label,
 							AllDay:       true,
+							Declined:     declined,
 						})
 					}
 				} else {
@@ -245,10 +253,12 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 						}
 						events = append(events, CalendarEvent{
 							ID:           uid,
+							UID:          uid,
 							Summary:      summary,
 							StartTime:    startTime.In(now.Location()).Format("15:04"),
 							EndTime:      endTime.In(now.Location()).Format("15:04"),
 							CalendarName: label,
+							Declined:     declined,
 						})
 					}
 				}
@@ -258,6 +268,12 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 		}
 		if !inEvent {
 			continue
+		}
+
+		// Best-effort single-user declined heuristic: any PARTSTAT=DECLINED line
+		// (typically on an ATTENDEE param) means the user declined this event.
+		if strings.Contains(line, "PARTSTAT=DECLINED") {
+			declined = true
 		}
 
 		// Parse property;params:value
