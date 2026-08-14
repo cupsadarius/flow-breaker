@@ -135,56 +135,79 @@ func cliArchive() {
 }
 
 // doneByID marks the task done via the daemon and prints the result.
-func doneByID(c *Client, id int) {
+func doneByID(c *Client, id int) error {
 	var resp taskResp
 	if err := c.Post(fmt.Sprintf("/task/%d/done", id), map[string]any{"source": "cli"}, &resp); err != nil {
-		cliFail(err)
+		return err
 	}
 	fmt.Printf("✓ done: %s %s\n", resp.Task.Time, resp.Task.Desc)
+	return nil
 }
 
 func cliDone(args []string) {
 	if len(args) < 1 {
 		fmt.Println("usage: flow-breaker done <id | HH:MM | description substring>")
+		fmt.Println("note: an all-digits arg is treated as a task ID, not a substring")
 		os.Exit(1)
 	}
-	c := newClient()
-	// A single integer arg is treated as a task ID (v2 ID-preference).
+	if err := doneWithClient(newClient(), args); err != nil {
+		cliFail(err)
+	}
+}
+
+// doneWithClient resolves args to a task and marks it done over c. A single
+// all-digits arg is treated as a task ID (v2 ID-preference); otherwise the
+// joined args are matched as an HH:MM/substring query client-side, matching v1.
+func doneWithClient(c *Client, args []string) error {
 	if len(args) == 1 {
 		if id, err := strconv.Atoi(args[0]); err == nil {
-			doneByID(c, id)
-			return
+			return doneByID(c, id)
 		}
 	}
-	// Otherwise resolve a substring / HH:MM match client-side, matching v1.
 	q := strings.ToLower(strings.Join(args, " "))
 	var tasks []Task
 	if err := c.Get("/tasks", &tasks); err != nil {
-		cliFail(err)
+		return err
 	}
 	for _, t := range tasks {
 		if strings.ToLower(t.Time) == q || strings.Contains(strings.ToLower(t.Desc), q) {
-			doneByID(c, t.ID)
-			return
+			return doneByID(c, t.ID)
 		}
 	}
 	fmt.Println("no matching task found")
+	return nil
 }
 
 func cliClear() {
-	c := newClient()
-	var tasks []Task
-	if err := c.Get("/tasks", &tasks); err != nil {
+	n, err := clearWithClient(newClient())
+	if err != nil {
 		cliFail(err)
+	}
+	fmt.Printf("✓ cleared %d task(s)\n", n)
+}
+
+// clearWithClient deletes every task (active and archived, per the documented
+// "delete all tasks" contract) over c and returns the count deleted. A task
+// that 404s mid-loop (concurrently removed by the TUI/daemon) is counted as
+// already gone and skipped; only a transport failure (ErrDaemonDown) aborts.
+func clearWithClient(c *Client) (int, error) {
+	var tasks []Task
+	if err := c.Get("/tasks?scope=all", &tasks); err != nil {
+		return 0, err
 	}
 	n := 0
 	for _, t := range tasks {
-		if err := c.Delete(fmt.Sprintf("/task/%d", t.ID), map[string]any{"source": "cli"}, nil); err != nil {
-			cliFail(err)
+		err := c.Delete(fmt.Sprintf("/task/%d", t.ID), map[string]any{"source": "cli"}, nil)
+		if err != nil {
+			if errors.Is(err, ErrDaemonDown) {
+				return n, err
+			}
+			// Concurrent delete (404 / not found): already gone, keep going.
+			continue
 		}
 		n++
 	}
-	fmt.Printf("✓ cleared %d task(s)\n", n)
+	return n, nil
 }
 
 func cliStatus() {
