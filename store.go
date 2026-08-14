@@ -593,8 +593,14 @@ func (s *Store) materializeCalendar(events []CalendarEvent, now time.Time) (adde
 	}
 	s.Tasks = remaining
 
-	s.sortTasks()
-	s.saveLocked()
+	// Only touch disk when something actually changed. A steady-state refresh
+	// (nothing added/updated/dropped) leaves s.Tasks byte-identical, so sorting
+	// and rewriting tasks.json every 15-min tick is pure SD-card wear — an
+	// explicit v2 constraint to avoid.
+	if added+updated+dropped > 0 {
+		s.sortTasks()
+		s.saveLocked()
+	}
 	return added, updated, dropped
 }
 

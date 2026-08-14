@@ -377,8 +377,11 @@ func getCachedOrFetchEvents(feeds []CalendarFeed, cacheMins int) ([]CalendarEven
 		FetchedAt: time.Now().Format(time.RFC3339),
 		ForDate:   today,
 	}
+	// 0o600: the cache holds parsed private-calendar event summaries — the same
+	// secret content the cal-add hint tells users to guard, matching the feeds
+	// file's own 0o600.
 	cacheData, _ := json.MarshalIndent(cache, "", "  ")
-	os.WriteFile(cachePath(), cacheData, 0o644)
+	os.WriteFile(cachePath(), cacheData, 0o600)
 
 	return events, nil
 }

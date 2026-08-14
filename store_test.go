@@ -226,6 +226,37 @@ func TestMaterializeCalendarUpsertPreservesAck(t *testing.T) {
 	}
 }
 
+// TestMaterializeCalendarNoOpDoesNotRewrite guards the SD-card-wear fix: a second
+// identical refresh (nothing added/updated/dropped) must not rewrite tasks.json.
+// We prove no write happened by rewinding the file's mtime and asserting it is
+// unchanged after the no-op call (saveLocked would bump it to ~now).
+func TestMaterializeCalendarNoOpDoesNotRewrite(t *testing.T) {
+	t.Setenv("FLOW_BREAKER_DIR", t.TempDir())
+	now := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	s := &Store{NextID: 1, Settings: defaultSettings()}
+
+	events := []CalendarEvent{calEvent("u1", "Standup", "09:00")}
+	s.materializeCalendar(events, now) // first call writes the file
+
+	// Rewind mtime well into the past so a rewrite is unambiguously detectable.
+	old := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(dataPath(), old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	added, updated, dropped := s.materializeCalendar(events, now)
+	if added != 0 || updated != 0 || dropped != 0 {
+		t.Fatalf("second identical refresh counts = (%d,%d,%d), want (0,0,0)", added, updated, dropped)
+	}
+	fi, err := os.Stat(dataPath())
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !fi.ModTime().Equal(old) {
+		t.Fatalf("no-op refresh rewrote tasks.json: mtime moved from %v to %v", old, fi.ModTime())
+	}
+}
+
 // TestMaterializeCalendarSkipsIneligible guards Task 2: declined, all-day, and
 // no-start events are never materialized.
 func TestMaterializeCalendarSkipsIneligible(t *testing.T) {
