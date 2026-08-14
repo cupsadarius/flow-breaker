@@ -869,6 +869,16 @@ func stripJSONC(data []byte) []byte {
 	return re.ReplaceAll(data, []byte("$1"))
 }
 
+// patchOpencodeConfig writes the fail-closed flow-breaker permission.bash map.
+//
+// SECURITY COUPLING: the fail-closed guarantee depends on opencode resolving
+// permission.bash matches in object-KEY ORDER, last match winning (validated
+// against the opencode release this was built for). The catch-all
+// "flow-breaker *" sorts first (see the managed map below), so the specific
+// per-subcommand rules that sort after it override it. If a future opencode
+// release changes that resolution order (e.g. first-match-wins, or
+// most-specific-wins), this coupling breaks and the ordering must be re-checked
+// on upgrade.
 func patchOpencodeConfig(path string) {
 	var config map[string]interface{}
 
@@ -980,7 +990,7 @@ const opencodePluginJS = `export const FlowBreaker = async ({ $ }) => {
   // Init: one loud nudge (includes the honest "unreachable" line once).
   let initNudge = ""
   try {
-    initNudge = (await $` + "`flow-breaker nudge`" + `.quiet().nothrow().text()).trim()
+    initNudge = (await $` + "`flow-breaker nudge`" + `.quiet().nothrow().timeout(800).text()).trim()
   } catch {
     initNudge = ""
   }
