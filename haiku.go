@@ -59,14 +59,15 @@ type haikuResult struct {
 }
 
 // parseHaiku resolves `text` into the 5-field contract via one Haiku call. It
-// respects ctx (the caller passes a 3s timeout). If ANTHROPIC_API_KEY is unset
-// it returns an error immediately without touching the network.
-func parseHaiku(ctx context.Context, text string) (ParseResult, error) {
+// respects ctx (the caller passes a 3s timeout) and uses the injected `now` (not
+// the wall clock) so it agrees with the heuristics on "today". If
+// ANTHROPIC_API_KEY is unset it returns an error immediately without touching
+// the network.
+func parseHaiku(ctx context.Context, text string, now time.Time) (ParseResult, error) {
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		return ParseResult{}, fmt.Errorf("parseHaiku: ANTHROPIC_API_KEY not set")
 	}
 
-	now := time.Now()
 	system := fmt.Sprintf(`You convert a short task-capture note into a structured schedule.
 
 The current local time ("now") is %s (%s).

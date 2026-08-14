@@ -33,11 +33,49 @@ type ParseResult struct {
 	Desc       string     // the stripped remainder
 }
 
-// empty reports whether the result carries nothing schedulable — no time, no
-// recurrence, no explicit weekday set. Used to apply the inbox floor when Haiku
-// returns a result that can't actually be placed on the clock.
-func (r ParseResult) empty() bool {
-	return r.Time == "" && r.Recurrence == "" && len(r.Days) == 0
+var reHHMM = regexp.MustCompile(`^\d{2}:\d{2}$`)
+
+// valid reports whether the result is safely schedulable — the trust boundary
+// for Haiku output (and cheap insurance for heuristics). A result is schedulable
+// only if it can actually be placed on the clock, so a non-empty valid Time is
+// REQUIRED: every recurrence here (once/daily/weekdays/weekly/monthly) fires at
+// a time-of-day, and empty()/all-fields-empty can never be true for real schema
+// output (recurrence is a required enum). Also validates Date, the recurrence
+// enum, and that every Days entry is a store weekdayShort code ("mon", not
+// "monday"). Anything failing → inbox floor.
+func (r ParseResult) valid() bool {
+	if !reHHMM.MatchString(r.Time) {
+		return false
+	}
+	h, _ := strconv.Atoi(r.Time[:2])
+	m, _ := strconv.Atoi(r.Time[3:])
+	if h > 23 || m > 59 {
+		return false
+	}
+	if _, err := time.Parse("2006-01-02", r.Date); err != nil {
+		return false
+	}
+	switch r.Recurrence {
+	case Once, Daily, Weekdays, Weekly, Monthly:
+	default:
+		return false
+	}
+	for _, d := range r.Days {
+		if !isWeekdayShort(d) {
+			return false
+		}
+	}
+	return true
+}
+
+// isWeekdayShort reports whether d is one of the store's 3-letter weekday codes.
+func isWeekdayShort(d string) bool {
+	for _, w := range weekdayShort {
+		if w == d {
+			return true
+		}
+	}
+	return false
 }
 
 // Anchored, case-insensitive heuristic patterns. Each captures the numeric parts
@@ -53,9 +91,10 @@ var (
 
 	// recurring
 	reEveryWeekday = regexp.MustCompile(`(?i)\bevery\s+weekdays?\s+at\s+(\d{1,2})(?::(\d{2}))?\b`)
-	// No leading \b: RE2's \b is ASCII-only and won't match before "î" (U+00EE).
-	// The multi-word phrase is distinctive enough that a bare start is safe.
-	reInFiecareZi = regexp.MustCompile(`(?i)[iî]n\s+fiecare\s+zi(?:\s+la\s+(\d{1,2})(?::(\d{2}))?)?\b`)
+	// RE2's \b is ASCII-only and won't match before "î" (U+00EE), so instead
+	// anchor on start-of-string or whitespace. Without this, "in"/"în" inside
+	// "din fiecare" / "puțin fiecare" would match and fabricate a daily task.
+	reInFiecareZi = regexp.MustCompile(`(?i)(?:^|\s)[iî]n\s+fiecare\s+zi(?:\s+la\s+(\d{1,2})(?::(\d{2}))?)?\b`)
 
 	// tomorrow H[:MM]  /  mâine|maine H[:MM]
 	reTomorrow = regexp.MustCompile(`(?i)\btomorrow\s+(\d{1,2})(?::(\d{2}))?\b`)
@@ -83,8 +122,11 @@ func resolveClock(hourStr, minStr string) (h, m int, ok bool) {
 			return 0, 0, false
 		}
 	}
-	if !hasMin && h >= 1 && h <= 6 {
-		return 0, 0, false // bare AM/PM-ambiguous hour → leave for Haiku
+	if !hasMin && h >= 1 && h <= 11 {
+		// A bare hour 1..11 is AM/PM-ambiguous — a personal reminder "at 8"
+		// almost always means 20:00, not 08:00 — so leave it for Haiku. Only
+		// 0, 12, and 13..23 (unambiguously 24h) or any colon form resolve here.
+		return 0, 0, false
 	}
 	return h, m, true
 }
@@ -123,14 +165,19 @@ func parseHeuristics(text string, now time.Time) (ParseResult, bool) {
 
 	// ── recurring (checked before bare at/la, which they contain) ─────────
 	if loc := reEveryWeekday.FindStringSubmatchIndex(text); loc != nil {
-		if h, m, ok := resolveClock(group(text, loc, 2), group(text, loc, 4)); ok {
-			return ParseResult{
-				Time:       fmt.Sprintf("%02d:%02d", h, m),
-				Date:       today,
-				Recurrence: Weekdays,
-				Desc:       strip(text, loc[0:2]),
-			}, true
+		// A matched-but-invalid recurring clock must floor, not fall through to a
+		// later bare at/la matcher (which would fabricate a Once from the same
+		// string). Symmetric with the în-fiecare-zi branch below.
+		h, m, ok := resolveClock(group(text, loc, 2), group(text, loc, 4))
+		if !ok {
+			return ParseResult{}, false
 		}
+		return ParseResult{
+			Time:       fmt.Sprintf("%02d:%02d", h, m),
+			Date:       today,
+			Recurrence: Weekdays,
+			Desc:       strip(text, loc[0:2]),
+		}, true
 	}
 	if loc := reInFiecareZi.FindStringSubmatchIndex(text); loc != nil {
 		timeStr := ""
@@ -228,31 +275,46 @@ func hasTimeSignal(text string) bool {
 	return reTimeSignal.MatchString(text)
 }
 
+// HaikuFn resolves a heuristic miss via one model call. now is threaded through
+// (not read from the wall clock) so heuristics and Haiku agree on "today" even
+// across a midnight boundary. Tests inject a fake.
+type HaikuFn func(ctx context.Context, text string, now time.Time) (ParseResult, error)
+
 // Parse is the dispatcher. haiku lets tests inject a fake; production wires
 // parseHaiku with a 3s timeout (see DefaultParse). It returns the parsed result
 // plus a destination ("scheduled"|"inbox") and provenance
 // ("heuristics"|"haiku"|"none").
-func Parse(text string, now time.Time, haiku func(context.Context, string) (ParseResult, error)) (res ParseResult, dest string, parsedBy string) {
+func Parse(text string, now time.Time, haiku HaikuFn) (res ParseResult, dest string, parsedBy string) {
 	return parseWithTimeout(text, now, haiku, 3*time.Second)
+}
+
+// inboxFloor is the fallback result for anything not confidently schedulable:
+// the raw capture kept as-is, dated today.
+func inboxFloor(text string, now time.Time) (ParseResult, string, string) {
+	return ParseResult{Date: now.Format("2006-01-02"), Desc: strings.TrimSpace(text)}, "inbox", "none"
 }
 
 // parseWithTimeout is Parse with an injectable Haiku timeout so the timeout path
 // can be tested without a real 3s wait.
-func parseWithTimeout(text string, now time.Time, haiku func(context.Context, string) (ParseResult, error), timeout time.Duration) (ParseResult, string, string) {
-	if res, ok := parseHeuristics(text, now); ok {
+func parseWithTimeout(text string, now time.Time, haiku HaikuFn, timeout time.Duration) (ParseResult, string, string) {
+	// valid() is cheap insurance on the heuristic leg too: a heuristic "hit" that
+	// isn't actually schedulable (e.g. a bare "în fiecare zi" with no time) falls
+	// through rather than being scheduled with no clock.
+	if res, ok := parseHeuristics(text, now); ok && res.valid() {
 		return res, "scheduled", "heuristics"
 	}
 	if !hasTimeSignal(text) {
-		return ParseResult{Date: now.Format("2006-01-02"), Desc: strings.TrimSpace(text)}, "inbox", "none"
+		return inboxFloor(text, now)
 	}
 	// Time-ish signal present but heuristics missed → one Haiku call, guarded by
-	// a timeout. Any failure (error, timeout, or an empty/unschedulable result)
-	// falls through to the inbox floor — never a silently dropped or guessed task.
+	// a timeout. Any failure — error, timeout, or a result that fails validation
+	// at the trust boundary — falls to the inbox floor. Never a silently dropped
+	// or guessed task.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	res, err := haiku(ctx, text)
-	if err != nil || res.empty() {
-		return ParseResult{Date: now.Format("2006-01-02"), Desc: strings.TrimSpace(text)}, "inbox", "none"
+	res, err := haiku(ctx, text, now)
+	if err != nil || !res.valid() {
+		return inboxFloor(text, now)
 	}
 	return res, "scheduled", "haiku"
 }

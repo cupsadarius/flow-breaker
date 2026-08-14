@@ -47,23 +47,31 @@ func TestParseHeuristics(t *testing.T) {
 		{"peste N minute", "sună instalatorul peste 15 minute", ParseResult{Time: "10:15", Date: today, Recurrence: Once, Desc: "sună instalatorul"}, true},
 		{"peste N de minute", "pauză peste 90 de minute", ParseResult{Time: "11:30", Date: today, Recurrence: Once, Desc: "pauză"}, true},
 		{"peste Nh", "pauză peste 2h", ParseResult{Time: "12:00", Date: today, Recurrence: Once, Desc: "pauză"}, true},
-		// ── at H (EN) ──────────────────────────────────────────────────
+		// ── at/la HH:MM (colon form always resolves, even low hours) ────
 		{"at HH:MM", "meeting at 14:30", ParseResult{Time: "14:30", Date: today, Recurrence: Once, Desc: "meeting"}, true},
-		{"at H unambiguous", "lunch at 8", ParseResult{Time: "08:00", Date: today, Recurrence: Once, Desc: "lunch"}, true},
-		// ── la H (RO) ──────────────────────────────────────────────────
+		{"at low HH:MM colon", "meeting at 08:30", ParseResult{Time: "08:30", Date: today, Recurrence: Once, Desc: "meeting"}, true},
 		{"la HH:MM", "ședință la 15:00", ParseResult{Time: "15:00", Date: today, Recurrence: Once, Desc: "ședință"}, true},
-		{"la H", "prânz la 13", ParseResult{Time: "13:00", Date: today, Recurrence: Once, Desc: "prânz"}, true},
+		{"la H unambiguous (>=12)", "prânz la 13", ParseResult{Time: "13:00", Date: today, Recurrence: Once, Desc: "prânz"}, true},
+		{"at 12 noon resolves", "lunch at 12", ParseResult{Time: "12:00", Date: today, Recurrence: Once, Desc: "lunch"}, true},
 		// ── tomorrow / mâine ───────────────────────────────────────────
-		{"tomorrow H", "gym tomorrow 7", ParseResult{Time: "07:00", Date: tomorrow, Recurrence: Once, Desc: "gym"}, true},
+		{"tomorrow H (>=12)", "gym tomorrow 18", ParseResult{Time: "18:00", Date: tomorrow, Recurrence: Once, Desc: "gym"}, true},
 		{"mâine H:MM", "curs mâine 9:30", ParseResult{Time: "09:30", Date: tomorrow, Recurrence: Once, Desc: "curs"}, true},
 		{"maine no diacritic", "curs maine 9:30", ParseResult{Time: "09:30", Date: tomorrow, Recurrence: Once, Desc: "curs"}, true},
 		// ── recurring ──────────────────────────────────────────────────
-		{"every weekday at H", "standup every weekday at 9", ParseResult{Time: "09:00", Date: today, Recurrence: Weekdays, Desc: "standup"}, true},
+		{"every weekday at HH:MM", "standup every weekday at 09:30", ParseResult{Time: "09:30", Date: today, Recurrence: Weekdays, Desc: "standup"}, true},
 		{"în fiecare zi", "citește în fiecare zi la 20", ParseResult{Time: "20:00", Date: today, Recurrence: Daily, Desc: "citește"}, true},
-		// ── misses (ambiguous / no time) ───────────────────────────────
-		{"bare AM/PM ambiguous", "call plumber at 3", ParseResult{}, false},
+		// ── misses: AM/PM-ambiguous bare hours (1..11) → Haiku ──────────
+		{"bare 3 ambiguous", "call plumber at 3", ParseResult{}, false},
+		{"bare 8 ambiguous", "dinner at 8", ParseResult{}, false},
+		{"bare 11 ambiguous", "call at 11", ParseResult{}, false},
+		{"tomorrow bare 7 ambiguous", "gym tomorrow 7", ParseResult{}, false},
+		{"every weekday bare 9 ambiguous", "standup every weekday at 9", ParseResult{}, false},
+		// ── misses: invalid / out-of-range clock → Haiku or inbox ───────
+		{"invalid clock 25:99", "call at 25:99", ParseResult{}, false},
+		// ── misses: no time / over-match guards ─────────────────────────
 		{"no time at all", "call the plumber", ParseResult{}, false},
 		{"timeless with keyword", "call plumber at some point", ParseResult{}, false},
+		{"din fiecare not daily", "citește din fiecare zi", ParseResult{}, false},
 	}
 
 	for _, c := range cases {
@@ -76,6 +84,29 @@ func TestParseHeuristics(t *testing.T) {
 				t.Fatalf("result = %+v, want %+v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestParseResultValid(t *testing.T) {
+	cases := []struct {
+		name string
+		r    ParseResult
+		want bool
+	}{
+		{"ok once", ParseResult{Time: "09:00", Date: "2026-01-05", Recurrence: Once}, true},
+		{"ok weekly with days", ParseResult{Time: "09:00", Date: "2026-01-05", Recurrence: Weekly, Days: []string{"mon", "thu"}}, true},
+		{"empty time", ParseResult{Time: "", Date: "2026-01-05", Recurrence: Once}, false},
+		{"non HHMM time", ParseResult{Time: "9:00", Date: "2026-01-05", Recurrence: Once}, false},
+		{"hour out of range", ParseResult{Time: "99:99", Date: "2026-01-05", Recurrence: Once}, false},
+		{"minute out of range", ParseResult{Time: "10:75", Date: "2026-01-05", Recurrence: Once}, false},
+		{"bad date", ParseResult{Time: "09:00", Date: "2026-13-40", Recurrence: Once}, false},
+		{"unknown recurrence", ParseResult{Time: "09:00", Date: "2026-01-05", Recurrence: Recurrence("yearly")}, false},
+		{"long weekday name", ParseResult{Time: "09:00", Date: "2026-01-05", Recurrence: Weekly, Days: []string{"monday"}}, false},
+	}
+	for _, c := range cases {
+		if got := c.r.valid(); got != c.want {
+			t.Errorf("%s: valid() = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
@@ -102,19 +133,27 @@ func TestHasTimeSignal(t *testing.T) {
 }
 
 func TestParseDispatch(t *testing.T) {
-	fakeOK := func(context.Context, string) (ParseResult, error) {
+	fakeOK := func(context.Context, string, time.Time) (ParseResult, error) {
 		return ParseResult{Time: "15:00", Date: "2026-01-05", Recurrence: Once, Desc: "call plumber"}, nil
 	}
-	fakeErr := func(context.Context, string) (ParseResult, error) {
+	fakeErr := func(context.Context, string, time.Time) (ParseResult, error) {
 		return ParseResult{}, errors.New("boom")
 	}
-	fakeEmpty := func(context.Context, string) (ParseResult, error) {
-		return ParseResult{Date: "2026-01-05"}, nil // no time / recurrence
+	// Realistic unschedulable output: schema-valid shape (recurrence is a
+	// required enum) but no time-of-day → must be floored.
+	fakeNoTime := func(context.Context, string, time.Time) (ParseResult, error) {
+		return ParseResult{Time: "", Date: "2026-01-05", Recurrence: Once}, nil
+	}
+	fakeGarbageTime := func(context.Context, string, time.Time) (ParseResult, error) {
+		return ParseResult{Time: "99:99", Date: "2026-01-05", Recurrence: Once}, nil
+	}
+	fakeGarbageDays := func(context.Context, string, time.Time) (ParseResult, error) {
+		return ParseResult{Time: "15:00", Date: "2026-01-05", Recurrence: Weekly, Days: []string{"monday"}}, nil
 	}
 
 	t.Run("heuristic hit skips haiku", func(t *testing.T) {
 		called := false
-		spy := func(ctx context.Context, s string) (ParseResult, error) {
+		spy := func(ctx context.Context, s string, now time.Time) (ParseResult, error) {
 			called = true
 			return ParseResult{}, nil
 		}
@@ -129,7 +168,7 @@ func TestParseDispatch(t *testing.T) {
 
 	t.Run("no signal goes to inbox", func(t *testing.T) {
 		called := false
-		spy := func(ctx context.Context, s string) (ParseResult, error) {
+		spy := func(ctx context.Context, s string, now time.Time) (ParseResult, error) {
 			called = true
 			return ParseResult{}, nil
 		}
@@ -143,7 +182,7 @@ func TestParseDispatch(t *testing.T) {
 	})
 
 	t.Run("signal + haiku success", func(t *testing.T) {
-		res, dest, by := Parse("call plumber at 3", parseNow, fakeOK)
+		res, dest, by := Parse("dinner at 8", parseNow, fakeOK)
 		if dest != "scheduled" || by != "haiku" {
 			t.Fatalf("dest/by = %s/%s, want scheduled/haiku", dest, by)
 		}
@@ -152,28 +191,57 @@ func TestParseDispatch(t *testing.T) {
 		}
 	})
 
+	t.Run("pm-band bare hour routes to haiku", func(t *testing.T) {
+		called := false
+		spy := func(ctx context.Context, s string, now time.Time) (ParseResult, error) {
+			called = true
+			return ParseResult{Time: "20:00", Date: "2026-01-05", Recurrence: Once, Desc: "dinner"}, nil
+		}
+		_, dest, by := Parse("dinner at 8", parseNow, spy)
+		if !called {
+			t.Fatal("haiku not called for a bare pm-band hour")
+		}
+		if dest != "scheduled" || by != "haiku" {
+			t.Fatalf("dest/by = %s/%s, want scheduled/haiku", dest, by)
+		}
+	})
+
 	t.Run("signal + haiku error → inbox floor", func(t *testing.T) {
-		_, dest, by := Parse("call plumber at 3", parseNow, fakeErr)
+		_, dest, by := Parse("dinner at 8", parseNow, fakeErr)
 		if dest != "inbox" || by != "none" {
 			t.Fatalf("dest/by = %s/%s, want inbox/none", dest, by)
 		}
 	})
 
-	t.Run("signal + haiku empty → inbox floor", func(t *testing.T) {
-		_, dest, by := Parse("call plumber at 3", parseNow, fakeEmpty)
+	t.Run("signal + haiku no-time → inbox floor", func(t *testing.T) {
+		_, dest, by := Parse("dinner at 8", parseNow, fakeNoTime)
+		if dest != "inbox" || by != "none" {
+			t.Fatalf("dest/by = %s/%s, want inbox/none", dest, by)
+		}
+	})
+
+	t.Run("signal + garbage time → inbox floor", func(t *testing.T) {
+		_, dest, by := Parse("dinner at 8", parseNow, fakeGarbageTime)
+		if dest != "inbox" || by != "none" {
+			t.Fatalf("dest/by = %s/%s, want inbox/none", dest, by)
+		}
+	})
+
+	t.Run("signal + garbage days → inbox floor", func(t *testing.T) {
+		_, dest, by := Parse("dinner at 8", parseNow, fakeGarbageDays)
 		if dest != "inbox" || by != "none" {
 			t.Fatalf("dest/by = %s/%s, want inbox/none", dest, by)
 		}
 	})
 
 	t.Run("signal + haiku timeout → inbox floor", func(t *testing.T) {
-		blocking := func(ctx context.Context, s string) (ParseResult, error) {
+		blocking := func(ctx context.Context, s string, now time.Time) (ParseResult, error) {
 			<-ctx.Done()
 			return ParseResult{}, ctx.Err()
 		}
 		// Exercise the real WithTimeout wiring with a short deadline so the test
 		// stays fast (no 3s wait).
-		_, dest, by := parseWithTimeout("call plumber at 3", parseNow, blocking, 20*time.Millisecond)
+		_, dest, by := parseWithTimeout("dinner at 8", parseNow, blocking, 20*time.Millisecond)
 		if dest != "inbox" || by != "none" {
 			t.Fatalf("dest/by = %s/%s, want inbox/none", dest, by)
 		}
