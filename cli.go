@@ -348,9 +348,15 @@ func nudgeWithClient(c *Client, quiet bool, out io.Writer) error {
 // "opencode"; else it is a plain "cli" invocation.
 //
 // FLOW_BREAKER_SOURCE is the reliable primary — the opencode plugin/AGENTS.md
-// can export it. The OPENCODE env sniff is best-effort: if a given opencode
-// release does not set it, mutations fall back to "cli" rather than being
+// can export it. The OPENCODE/CODEX env sniffs are best-effort: if a given
+// release does not set them, mutations fall back to "cli" rather than being
 // misattributed.
+//
+// Codex is detected via CODEX (a runtime-only signal set by the Codex CLI
+// process), NOT CODEX_HOME: a user may export CODEX_HOME permanently in their
+// shell (and `codex-install` itself accepts it), so keying off CODEX_HOME would
+// misattribute plain-terminal invocations as "codex". CODEX-absent just falls
+// back to "cli", matching the OPENCODE best-effort philosophy.
 func cliSource() string {
 	if s := os.Getenv("FLOW_BREAKER_SOURCE"); s != "" {
 		return s
@@ -360,6 +366,9 @@ func cliSource() string {
 	}
 	if os.Getenv("OPENCODE") != "" {
 		return "opencode"
+	}
+	if os.Getenv("CODEX") != "" {
+		return "codex"
 	}
 	return "cli"
 }
@@ -1090,6 +1099,206 @@ func patchAgentsMD(path string) {
 	}
 }
 
+// ── Codex CLI Integration ────────────────────────────────────────────────────
+
+// codexHome resolves Codex's config root: $CODEX_HOME if set, else ~/.codex.
+func codexHome() (string, error) {
+	if h := os.Getenv("CODEX_HOME"); h != "" {
+		return h, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".codex"), nil
+}
+
+// cliCodexInstall wires flow-breaker into Codex CLI under $CODEX_HOME (or
+// ~/.codex): merges the nudge hooks into the multi-tenant hooks.json, writes a
+// dedicated fail-closed ExecPolicy rules file, and upserts AGENTS.md. It does
+// NOT touch config.toml — enabling hooks is a manual step it prints.
+func cliCodexInstall() {
+	dir, err := codexHome()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine Codex home: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot create %s: %v\n", dir, err)
+		os.Exit(1)
+	}
+
+	hooksPath := filepath.Join(dir, "hooks.json")
+	rulesPath := filepath.Join(dir, "rules", "flow-breaker.rules")
+	agentsMDPath := filepath.Join(dir, "AGENTS.md")
+
+	if err := patchCodexHooks(hooksPath); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot patch %s: %v\n", hooksPath, err)
+		os.Exit(1)
+	}
+	if err := writeCodexRules(rulesPath); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", rulesPath, err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ wrote fail-closed ExecPolicy rules to ~/.codex/rules/flow-breaker.rules (base prompt · reads+capture+add allow · done/snooze prompt · clear forbidden)")
+	patchCodexAgentsMD(agentsMDPath)
+
+	// config.toml is NEVER auto-edited — enabling hooks is the user's call.
+	fmt.Println()
+	fmt.Println("⚠️  Manual step — enable hooks in ~/.codex/config.toml:")
+	fmt.Println("      [features]")
+	fmt.Println("      hooks = true")
+	fmt.Println()
+	// Trust caveat: ExecPolicy may be bypassed in a trusted project.
+	fmt.Println("⚠️  Trust caveat: in a project running at trust_level=\"trusted\", Codex may")
+	fmt.Println("    bypass ExecPolicy prefix_rules. Verify the fail-closed rules actually apply:")
+	fmt.Println("      echo | flow-breaker clear   # must be BLOCKED (forbidden)")
+	fmt.Println("    If it is NOT blocked under trust, the fallback is a PreToolUse hook")
+	fmt.Println("    returning allow/deny/ask — not installed here; wire it only if needed.")
+}
+
+// appendCodexHook appends a command-hook entry to events[event], preserving all
+// existing entries (supacode's are never clobbered). Codex entries carry a
+// per-hook timeout; the real 800ms budget lives inside `flow-breaker nudge`, so
+// this generous timeout just must not race it.
+func appendCodexHook(events map[string]interface{}, event, command string, timeout int) {
+	entries, _ := events[event].([]interface{})
+	entry := map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": command, "timeout": timeout},
+		},
+	}
+	events[event] = append(entries, entry)
+}
+
+// patchCodexHooks merges flow-breaker's nudge hooks into Codex's hooks.json.
+//
+// The file is MULTI-TENANT (supacode manages SessionStart/UserPromptSubmit/Stop
+// entries) and stores its event arrays under a top-level "hooks" object, mirror-
+// ing Claude Code's settings.json shape. This APPENDS to the existing arrays,
+// keyed by the "flow-breaker nudge" command marker so a re-run never duplicates:
+// SessionStart gets one loud nudge; UserPromptSubmit gets a gated quiet nudge.
+// Every pre-existing entry (supacode's included) is preserved.
+func patchCodexHooks(path string) error {
+	var root map[string]interface{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		root = map[string]interface{}{}
+	} else {
+		if err := json.Unmarshal(data, &root); err != nil {
+			return fmt.Errorf("%s is malformed JSON: %w", path, err)
+		}
+	}
+
+	events, ok := root["hooks"].(map[string]interface{})
+	if !ok {
+		events = map[string]interface{}{}
+		root["hooks"] = events
+	}
+
+	changed := false
+	if hookInstalled(events, "SessionStart", "flow-breaker nudge") {
+		fmt.Println("✓ SessionStart hook already configured")
+	} else {
+		appendCodexHook(events, "SessionStart", "flow-breaker nudge 2>/dev/null || true", 5)
+		changed = true
+		fmt.Println("✓ appended SessionStart hook to ~/.codex/hooks.json")
+	}
+	if hookInstalled(events, "UserPromptSubmit", "flow-breaker nudge --quiet") {
+		fmt.Println("✓ UserPromptSubmit hook already configured")
+	} else {
+		appendCodexHook(events, "UserPromptSubmit", "flow-breaker nudge --quiet 2>/dev/null || true", 5)
+		changed = true
+		fmt.Println("✓ appended UserPromptSubmit hook to ~/.codex/hooks.json")
+	}
+
+	if !changed {
+		return nil
+	}
+
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	return os.WriteFile(path, out, 0644)
+}
+
+// codexRulesContent is the full ExecPolicy rules file. It is OURS (a dedicated
+// file, not the shared default.rules), so it is written whole. Fail-closed: the
+// bare "flow-breaker" prefix is `prompt` (an unknown/new subcommand prompts,
+// since most-specific prefix wins), reads + capture + add `allow`, done/snooze
+// `prompt`, and clear `forbidden`.
+const codexRulesContent = `prefix_rule(pattern=["flow-breaker"], decision="prompt")
+prefix_rule(pattern=["flow-breaker", "nudge"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "status"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "list"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "ls"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "archive"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "cal-list"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "cal-feeds"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "capture"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "add"], decision="allow")
+prefix_rule(pattern=["flow-breaker", "done"], decision="prompt")
+prefix_rule(pattern=["flow-breaker", "snooze"], decision="prompt")
+prefix_rule(pattern=["flow-breaker", "clear"], decision="forbidden")
+`
+
+// writeCodexRules writes the dedicated flow-breaker ExecPolicy rules file whole,
+// creating the rules/ directory if needed. Overwrite-in-full is safe and
+// idempotent since the file is exclusively ours.
+func writeCodexRules(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(codexRulesContent), 0644)
+}
+
+// codexAgentsMDBlock is the marker-wrapped flow-breaker section for Codex's
+// ~/.codex/AGENTS.md. Same surface-not-act wording as Claude/opencode, but it
+// describes Codex's hooks.json transport; NO 30-min/loop guidance. No trailing
+// newline (the caller normalizes EOF).
+func codexAgentsMDBlock() string {
+	body := "## flow-breaker\n\n" +
+		"A SessionStart hook in `~/.codex/hooks.json` runs `flow-breaker nudge` once (loud) at the start of each session. A UserPromptSubmit hook runs `flow-breaker nudge --quiet` on every turn: the daemon gates it, so it stays silent unless something is interrupt-worthy (an alarm firing, a task overdue, or the next task due within ~10 minutes). It fails open on an 800ms timeout, so a missing or slow daemon never blocks the turn.\n\n" +
+		"When a nudge surfaces: **SURFACE it and continue — never act on it.** Mention the alert prominently to the user, then carry on with exactly what they asked. An overdue task must not make you abandon the user's work; the user decides what to do about it."
+	return fbBeginMarker + "\n" + body + "\n" + fbEndMarker
+}
+
+func patchCodexAgentsMD(path string) {
+	content := ""
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "error: cannot read %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	if err == nil {
+		content = string(data)
+	}
+
+	newContent, action := upsertFlowBreakerSection(content, codexAgentsMDBlock())
+	if newContent == content {
+		fmt.Println("✓ AGENTS.md already configured")
+		return
+	}
+
+	if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	switch action {
+	case "migrated":
+		fmt.Println("✓ migrated flow-breaker section in ~/.codex/AGENTS.md")
+	case "replaced":
+		fmt.Println("✓ updated flow-breaker section in ~/.codex/AGENTS.md")
+	default:
+		fmt.Println("✓ added flow-breaker section to ~/.codex/AGENTS.md")
+	}
+}
+
 func printUsage() {
 	fmt.Println(`flow-breaker — terminal daily planner that breaks your flow
 
@@ -1114,6 +1323,7 @@ CALENDAR:
 SETUP:
   flow-breaker claude-install    install Claude Code hook + instructions
   flow-breaker opencode-install  install opencode plugin + instructions
+  flow-breaker codex-install     install Codex CLI hooks + ExecPolicy rules
 
 INTEGRATION:
   The CLI talks to the daemon over HTTP/JSON. Start it with:
