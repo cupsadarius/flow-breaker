@@ -47,7 +47,6 @@ func buildStatusLocked(store *Store, alarm *alarmState) StatusReport {
 		r.AlarmFiring = true
 		t := store.Tasks[alarm.taskIdx]
 		r.AlarmTask = &t
-		r.Nudge = fmt.Sprintf("🚨 ALARM: %s — %s (do it NOW)", t.Time, t.Desc)
 	}
 
 	for _, t := range store.Tasks {
@@ -70,6 +69,21 @@ func buildStatusLocked(store *Store, alarm *alarmState) StatusReport {
 	// pick next
 	if len(r.Upcoming) > 0 {
 		r.Next = &r.Upcoming[0]
+	}
+
+	// alarm firing: lead with the alarm, then list every other overdue task
+	if r.AlarmFiring {
+		r.Nudge = fmt.Sprintf("🚨 ALARM: %s — %s (do it NOW)", r.AlarmTask.Time, r.AlarmTask.Desc)
+		var others []string
+		for _, o := range r.Overdue {
+			if o.ID == r.AlarmTask.ID {
+				continue
+			}
+			others = append(others, fmt.Sprintf("%s (%s)", o.Desc, o.Time))
+		}
+		if len(others) > 0 {
+			r.Nudge += fmt.Sprintf(" · also overdue: %s", strings.Join(others, ", "))
+		}
 	}
 
 	// build nudge if no alarm
