@@ -25,6 +25,7 @@ const (
 	ladderTelegramAt = 10 * time.Minute
 	ladderTerminalAt = 15 * time.Minute
 	ladderRepublish  = 60 * time.Second
+	ladderTgRetry    = 60 * time.Second
 	ladderAutoSnooze = 30 // minutes
 )
 
@@ -32,10 +33,12 @@ const (
 // persisted: on daemon restart every escalation-eligible past-due task gets a
 // fresh p3 ladder (position reset to p3) — that IS the reconstruction.
 type ladder struct {
-	firedAt     time.Time
-	prio        int
-	lastPublish time.Time // zero = never published
-	tgFired     bool
+	firedAt       time.Time
+	prio          int
+	lastPublish   time.Time // zero = never published
+	lastTgAttempt time.Time // zero = never attempted; throttles Telegram retries
+	tgFired       bool      // Telegram delivered (latched only on success)
+	delivered     bool      // at least one publish OR telegram has actually landed
 }
 
 // scheduler owns the per-task escalation ladders in the daemon. It re-evaluates
@@ -105,7 +108,9 @@ func (sc *scheduler) firing() int {
 	best := 0
 	var bestAt time.Time
 	for id, l := range sc.ladders {
-		if best == 0 || l.firedAt.Before(bestAt) {
+		// Earliest firedAt wins; ties broken by lowest task ID so /status is stable
+		// across ticks (map iteration order is random) when ladders share firedAt.
+		if best == 0 || l.firedAt.Before(bestAt) || (l.firedAt.Equal(bestAt) && id < best) {
 			best = id
 			bestAt = l.firedAt
 		}
@@ -142,6 +147,7 @@ func escalationEligible(t Task, now time.Time) bool {
 // publishReq / telegramReq / terminalReq are planned side-effects built under
 // sc.mu and executed after the lock is released.
 type publishReq struct {
+	id      int
 	prio    int
 	title   string
 	body    string
@@ -149,6 +155,7 @@ type publishReq struct {
 }
 
 type telegramReq struct {
+	id   int
 	text string
 }
 
@@ -174,8 +181,14 @@ func (sc *scheduler) tickOnce(now time.Time) {
 	sc.mu.Lock()
 
 	// Day rollover: forget yesterday's auto-snooze memory so a task that missed
-	// yesterday starts today's ladders fresh.
+	// yesterday starts today's ladders fresh, and flag the store to roll over too
+	// (resetDaily runs lock-free in stage 3). The first tick (empty dayKey) is not
+	// a rollover — the daemon already called resetDaily at startup.
+	rolledOver := false
 	if day := now.Format("2006-01-02"); day != sc.dayKey {
+		if sc.dayKey != "" {
+			rolledOver = true
+		}
 		sc.autoSnoozed = map[int]bool{}
 		sc.dayKey = day
 	}
@@ -212,16 +225,21 @@ func (sc *scheduler) tickOnce(now time.Time) {
 		}
 		elapsed := now.Sub(l.firedAt)
 
-		// Terminal: no more push this tick; snooze-or-missed and drop the ladder.
+		// Terminal — but ONLY once an alert has actually been delivered. Never
+		// silence an alarm that was never seen: if nothing has landed by 15m
+		// (ntfy + telegram both down), keep the ladder alive and keep retrying;
+		// the terminal snooze/Missed only fires after a real delivery.
 		if elapsed >= ladderTerminalAt {
-			if sc.autoSnoozed[id] {
-				terminals = append(terminals, terminalReq{id: id, missed: true})
-			} else {
-				terminals = append(terminals, terminalReq{id: id, missed: false})
-				sc.autoSnoozed[id] = true
+			if l.delivered {
+				// The terminal store mutation and the ladder's RAM teardown
+				// (delete + autoSnoozed) are committed in stage 3 AFTER the store
+				// write succeeds, so a failed write can't downgrade the two-strike
+				// guarantee. missed reflects whether this task already auto-snoozed.
+				terminals = append(terminals, terminalReq{id: id, missed: sc.autoSnoozed[id]})
+				continue
 			}
-			delete(sc.ladders, id)
-			continue
+			log.Printf("flow-breaker: task %d unacked >=15m but NO alert has been delivered (ntfy/telegram down?); keeping ladder alive and retrying", id)
+			// Fall through: keep republishing / retrying telegram below.
 		}
 
 		// Step priority from elapsed.
@@ -234,9 +252,12 @@ func (sc *scheduler) tickOnce(now time.Time) {
 			l.prio = 3
 		}
 
-		// Republish when never published or the cadence has elapsed.
+		// Republish when never published or the cadence has elapsed. lastPublish is
+		// latched optimistically to bound the cadence; delivered is set only on a
+		// successful send (stage 3).
 		if l.lastPublish.IsZero() || now.Sub(l.lastPublish) >= ladderRepublish {
 			publishes = append(publishes, publishReq{
+				id:      id,
 				prio:    l.prio,
 				title:   "Flow Breaker",
 				body:    taskHHMM(t, now) + " — " + t.Desc,
@@ -245,41 +266,82 @@ func (sc *scheduler) tickOnce(now time.Time) {
 			l.lastPublish = now
 		}
 
-		// Telegram once at 10:00.
+		// Telegram fallback at 10:00 — attempted at most once per 60s until it
+		// lands. lastTgAttempt is latched optimistically (throttle); tgFired is set
+		// only on a successful send (stage 3), so a failed attempt is retried.
 		if elapsed >= ladderTelegramAt && !l.tgFired {
-			telegrams = append(telegrams, telegramReq{
-				text: fmt.Sprintf("⏰ %s (%s) unacked 10min", t.Desc, taskHHMM(t, now)),
-			})
-			l.tgFired = true
+			if l.lastTgAttempt.IsZero() || now.Sub(l.lastTgAttempt) >= ladderTgRetry {
+				telegrams = append(telegrams, telegramReq{
+					id:   id,
+					text: fmt.Sprintf("⏰ %s (%s) unacked 10min", t.Desc, taskHHMM(t, now)),
+				})
+				l.lastTgAttempt = now
+			}
 		}
 	}
 
 	sc.mu.Unlock()
 
-	// Stage 3: execute with no lock held.
+	// Stage 3: execute with NO store/scheduler lock held during network I/O.
+	// After a successful send we briefly re-acquire sc.mu to latch delivery flags
+	// on the ladder if it still exists. tickOnce is the only ladder mutator and
+	// runs sequentially, so this short critical section (no network, no store
+	// lock) is safe and never nests locks.
+
+	// Day rollover: keep the store in step with the scheduler's dayKey so
+	// Missed/Done/Snoozed clear at midnight and tasks re-arm. Idempotent
+	// (resetDaily guards on LastReset==today).
+	if rolledOver {
+		sc.store.resetDaily()
+	}
+
 	for _, p := range publishes {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := sc.publish(ctx, p.prio, p.title, p.body, p.actions); err != nil {
-			log.Printf("flow-breaker: escalation publish failed: %v", err)
-		}
+		err := sc.publish(ctx, p.prio, p.title, p.body, p.actions)
 		cancel()
+		if err != nil {
+			log.Printf("flow-breaker: escalation publish failed: %v", err)
+			continue
+		}
+		sc.mu.Lock()
+		if l, ok := sc.ladders[p.id]; ok {
+			l.delivered = true
+		}
+		sc.mu.Unlock()
 	}
 	for _, tg := range telegrams {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := sc.telegram(ctx, tg.text); err != nil {
-			log.Printf("flow-breaker: escalation telegram failed: %v", err)
-		}
+		err := sc.telegram(ctx, tg.text)
 		cancel()
+		if err != nil {
+			log.Printf("flow-breaker: escalation telegram failed: %v", err)
+			continue
+		}
+		sc.mu.Lock()
+		if l, ok := sc.ladders[tg.id]; ok {
+			l.delivered = true
+			l.tgFired = true
+		}
+		sc.mu.Unlock()
 	}
 	for _, term := range terminals {
 		if term.missed {
 			if _, err := sc.store.markMissed(term.id); err != nil {
 				log.Printf("flow-breaker: escalation mark-missed failed: %v", err)
+				continue // leave the ladder for the next tick
 			}
+			sc.mu.Lock()
+			delete(sc.ladders, term.id)
+			sc.mu.Unlock()
 		} else {
 			if _, err := sc.store.snoozeTask(term.id, ladderAutoSnooze, "escalation"); err != nil {
 				log.Printf("flow-breaker: escalation auto-snooze failed: %v", err)
+				continue // leave the ladder for the next tick
 			}
+			sc.mu.Lock()
+			sc.autoSnoozed[term.id] = true
+			delete(sc.ladders, term.id)
+			sc.mu.Unlock()
 		}
 	}
 }

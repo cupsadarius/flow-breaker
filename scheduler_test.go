@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -29,9 +30,11 @@ type pubCall struct {
 }
 
 type spy struct {
-	mu   sync.Mutex
-	pubs []pubCall
-	tgs  []string
+	mu     sync.Mutex
+	pubs   []pubCall
+	tgs    []string
+	pubErr error // returned by publish when non-nil (records the attempt first)
+	tgErr  error // returned by telegram when non-nil (records the attempt first)
 }
 
 func (s *spy) wire(sc *scheduler) {
@@ -39,15 +42,18 @@ func (s *spy) wire(sc *scheduler) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.pubs = append(s.pubs, pubCall{prio, title, body, actions})
-		return nil
+		return s.pubErr
 	}
 	sc.telegram = func(_ context.Context, text string) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.tgs = append(s.tgs, text)
-		return nil
+		return s.tgErr
 	}
 }
+
+func (s *spy) setPubErr(e error) { s.mu.Lock(); s.pubErr = e; s.mu.Unlock() }
+func (s *spy) setTgErr(e error)  { s.mu.Lock(); s.tgErr = e; s.mu.Unlock() }
 
 func (s *spy) pubCount() int {
 	s.mu.Lock()
@@ -334,5 +340,117 @@ func TestResetDailyClearsMissed(t *testing.T) {
 	defer store.mu.RUnlock()
 	if store.Tasks[0].Missed {
 		t.Fatalf("Missed = true after resetDaily, want cleared")
+	}
+}
+
+// TestUndeliveredAlarmNeverSilenced is the headline delivery-semantics fix: when
+// BOTH channels fail so nothing is ever delivered, the ladder must NOT auto-snooze
+// or go Missed at 15m — it stays alive and keeps attempting to publish.
+func TestUndeliveredAlarmNeverSilenced(t *testing.T) {
+	store := &Store{Tasks: []Task{dueTask(1, 0)}, NextID: 2, Settings: defaultSettings()}
+	sc, sp := newSpyScheduler(store)
+	sp.setPubErr(errors.New("ntfy down"))
+	sp.setTgErr(errors.New("telegram down"))
+
+	sc.tickOnce(schedNow)                       // t=0: publish attempted, fails
+	sc.tickOnce(schedNow.Add(15 * time.Minute)) // t=+15m: would terminal — but nothing delivered
+	sc.tickOnce(schedNow.Add(16 * time.Minute)) // t=+16m: still retrying
+
+	if _, ok := sc.ladders[1]; !ok {
+		t.Fatalf("ladder dropped despite zero deliveries, want kept alive")
+	}
+	store.mu.RLock()
+	missed, snoozed := store.Tasks[0].Missed, store.Tasks[0].Snoozed
+	store.mu.RUnlock()
+	if missed {
+		t.Fatalf("task Missed with no alert ever delivered, want NOT missed")
+	}
+	if snoozed != 0 {
+		t.Fatalf("task auto-snoozed (%d) with no alert ever delivered, want NOT snoozed", snoozed)
+	}
+	if sp.pubCount() < 3 {
+		t.Fatalf("pubCount = %d, want >=3 (kept attempting publish)", sp.pubCount())
+	}
+}
+
+// TestTelegramRetryUntilSuccess: telegram fails at 10m, is retried (throttled to
+// once/60s), and tgFired latches only once a send actually succeeds.
+func TestTelegramRetryUntilSuccess(t *testing.T) {
+	store := &Store{Tasks: []Task{dueTask(1, 0)}, NextID: 2, Settings: defaultSettings()}
+	sc, sp := newSpyScheduler(store)
+	sp.setTgErr(errors.New("telegram down")) // publish succeeds; telegram fails
+
+	sc.tickOnce(schedNow) // t=0: publish ok → delivered
+
+	// t=+10m: first telegram attempt fails, tgFired stays false.
+	sc.tickOnce(schedNow.Add(10 * time.Minute))
+	if sp.tgCount() != 1 {
+		t.Fatalf("t=+10m: tgCount = %d, want 1", sp.tgCount())
+	}
+	if sc.ladders[1].tgFired {
+		t.Fatalf("t=+10m: tgFired latched on a FAILED send, want false")
+	}
+
+	// t=+10m30s: throttled (<60s since attempt) → no new attempt.
+	sc.tickOnce(schedNow.Add(10*time.Minute + 30*time.Second))
+	if sp.tgCount() != 1 {
+		t.Fatalf("t=+10m30s: tgCount = %d, want still 1 (throttled)", sp.tgCount())
+	}
+
+	// Telegram recovers.
+	sp.setTgErr(nil)
+
+	// t=+11m: >=60s since last attempt → retried, succeeds, tgFired latches.
+	sc.tickOnce(schedNow.Add(11 * time.Minute))
+	if sp.tgCount() != 2 {
+		t.Fatalf("t=+11m: tgCount = %d, want 2 (retried)", sp.tgCount())
+	}
+	if !sc.ladders[1].tgFired {
+		t.Fatalf("t=+11m: tgFired = false after a successful send, want true")
+	}
+
+	// t=+12m: latched → no further attempts.
+	sc.tickOnce(schedNow.Add(12 * time.Minute))
+	if sp.tgCount() != 2 {
+		t.Fatalf("t=+12m: tgCount = %d, want still 2 (latched)", sp.tgCount())
+	}
+}
+
+// TestTickDrivenDailyReset: crossing midnight drives resetDaily from the tick, so
+// a Missed task clears in the store and re-arms at p3 (not silent until restart).
+func TestTickDrivenDailyReset(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_BREAKER_DIR", dir)
+
+	task := dueTask(1, 0)
+	task.Missed = true
+	store := &Store{Tasks: []Task{task}, NextID: 2, LastReset: "2020-01-01", Settings: defaultSettings()}
+	sc, _ := newSpyScheduler(store)
+
+	// First tick establishes today's dayKey (not a rollover); Missed task excluded.
+	sc.tickOnce(schedNow)
+	if len(sc.ladders) != 0 {
+		t.Fatalf("day 1: ladders = %d, want 0 (task still Missed)", len(sc.ladders))
+	}
+
+	// Cross midnight: rollover detected → resetDaily runs in stage 3, clearing
+	// Missed. The snapshot for THIS tick predates the reset, so no ladder yet.
+	nextDay := schedNow.Add(24 * time.Hour)
+	sc.tickOnce(nextDay)
+	store.mu.RLock()
+	missed := store.Tasks[0].Missed
+	store.mu.RUnlock()
+	if missed {
+		t.Fatalf("after rollover: task still Missed, want cleared by tick-driven resetDaily")
+	}
+
+	// Next tick sees the cleared task → re-arms a fresh p3 ladder.
+	sc.tickOnce(nextDay.Add(time.Second))
+	l, ok := sc.ladders[1]
+	if !ok {
+		t.Fatalf("after reset: no ladder, want p3 re-arm")
+	}
+	if l.prio != 3 {
+		t.Fatalf("re-armed ladder prio = %d, want 3", l.prio)
 	}
 }
