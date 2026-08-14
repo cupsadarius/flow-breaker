@@ -266,6 +266,7 @@ func TestCliSource(t *testing.T) {
 	t.Run("explicit env wins", func(t *testing.T) {
 		t.Setenv("FLOW_BREAKER_SOURCE", "phone")
 		t.Setenv("CLAUDECODE", "1")
+		t.Setenv("OPENCODE", "1")
 		if got := cliSource(); got != "phone" {
 			t.Fatalf("cliSource = %q, want phone", got)
 		}
@@ -273,13 +274,23 @@ func TestCliSource(t *testing.T) {
 	t.Run("claude code detected", func(t *testing.T) {
 		t.Setenv("FLOW_BREAKER_SOURCE", "")
 		t.Setenv("CLAUDECODE", "1")
+		t.Setenv("OPENCODE", "")
 		if got := cliSource(); got != "claude-code" {
 			t.Fatalf("cliSource = %q, want claude-code", got)
+		}
+	})
+	t.Run("opencode detected", func(t *testing.T) {
+		t.Setenv("FLOW_BREAKER_SOURCE", "")
+		t.Setenv("CLAUDECODE", "")
+		t.Setenv("OPENCODE", "1")
+		if got := cliSource(); got != "opencode" {
+			t.Fatalf("cliSource = %q, want opencode", got)
 		}
 	})
 	t.Run("plain cli fallback", func(t *testing.T) {
 		t.Setenv("FLOW_BREAKER_SOURCE", "")
 		t.Setenv("CLAUDECODE", "")
+		t.Setenv("OPENCODE", "")
 		if got := cliSource(); got != "cli" {
 			t.Fatalf("cliSource = %q, want cli", got)
 		}

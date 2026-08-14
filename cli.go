@@ -344,13 +344,22 @@ func nudgeWithClient(c *Client, quiet bool, out io.Writer) error {
 
 // cliSource resolves the source attribution stamped on CLI mutations. An
 // explicit FLOW_BREAKER_SOURCE wins; otherwise Claude Code (which sets CLAUDECODE)
-// is detected as "claude-code"; else it is a plain "cli" invocation.
+// is detected as "claude-code" and opencode (best-effort, via OPENCODE) as
+// "opencode"; else it is a plain "cli" invocation.
+//
+// FLOW_BREAKER_SOURCE is the reliable primary — the opencode plugin/AGENTS.md
+// can export it. The OPENCODE env sniff is best-effort: if a given opencode
+// release does not set it, mutations fall back to "cli" rather than being
+// misattributed.
 func cliSource() string {
 	if s := os.Getenv("FLOW_BREAKER_SOURCE"); s != "" {
 		return s
 	}
 	if os.Getenv("CLAUDECODE") != "" {
 		return "claude-code"
+	}
+	if os.Getenv("OPENCODE") != "" {
+		return "opencode"
 	}
 	return "cli"
 }
@@ -880,11 +889,32 @@ func patchOpencodeConfig(path string) {
 		}
 	}
 
-	changed := false
-
-	// ── Bash permission for flow-breaker nudge ──
-	const nudgePattern = "flow-breaker nudge*"
-	const nudgeAllow = "allow"
+	// ── Granular, fail-closed bash permissions ──
+	// opencode matches permission.bash last-match-wins over a FLAT map (unlike
+	// Claude Code's deny > ask > allow). The Go map marshals with sorted keys,
+	// and "flow-breaker *" (space 0x20 → '*' 0x2a) sorts before every
+	// "flow-breaker <letter>*", so the catch-all lands first and the specific
+	// rules after — last-match-wins is preserved WITHOUT ordered-map work.
+	//
+	// Fail-closed: the catch-all is `ask` (an unknown/new subcommand prompts
+	// rather than auto-runs), the real read commands + capture + add are
+	// `allow`, done/snooze `ask`, clear `deny`. There is deliberately NO global
+	// "*" — that would force every bash command in opencode to prompt.
+	managed := map[string]string{
+		"flow-breaker *":          "ask", // catch-all: unknown/new subcommand
+		"flow-breaker nudge*":     "allow",
+		"flow-breaker status*":    "allow",
+		"flow-breaker list*":      "allow",
+		"flow-breaker ls*":        "allow",
+		"flow-breaker archive*":   "allow",
+		"flow-breaker cal-list*":  "allow",
+		"flow-breaker cal-feeds*": "allow",
+		"flow-breaker capture*":   "allow",
+		"flow-breaker add*":       "allow",
+		"flow-breaker done*":      "ask",
+		"flow-breaker snooze*":    "ask",
+		"flow-breaker clear*":     "deny",
+	}
 
 	perm, ok := config["permission"].(map[string]interface{})
 	if !ok {
@@ -898,12 +928,21 @@ func patchOpencodeConfig(path string) {
 		perm["bash"] = bash
 	}
 
-	if existing, ok := bash[nudgePattern].(string); ok && existing == nudgeAllow {
-		fmt.Println("✓ bash permission already configured")
+	// Merge our managed patterns idempotently; the user's unrelated bash entries
+	// are left untouched. We are authoritative for the flow-breaker patterns, so
+	// a stale value on one of our keys is corrected to the fail-closed verb.
+	changed := false
+	for pattern, verb := range managed {
+		if existing, ok := bash[pattern].(string); !ok || existing != verb {
+			bash[pattern] = verb
+			changed = true
+		}
+	}
+
+	if changed {
+		fmt.Println("✓ merged fail-closed bash permissions (catch-all ask · reads+capture+add allow · done/snooze ask · clear deny)")
 	} else {
-		bash[nudgePattern] = nudgeAllow
-		changed = true
-		fmt.Println("✓ added bash permission for flow-breaker nudge")
+		fmt.Println("✓ bash permissions already configured")
 	}
 
 	if !changed {
@@ -923,23 +962,45 @@ func patchOpencodeConfig(path string) {
 	}
 }
 
+// opencodePluginJS is the flow-breaker opencode plugin. opencode has no
+// user-facing hook-stdout channel, so "surface" means inject into the model's
+// system context.
+//
+//   - Init (once): one LOUD `flow-breaker nudge` — including the honest
+//     "⚠️ unreachable" line — is injected the first turn so the model raises it.
+//   - Per turn: `flow-breaker nudge --quiet` (daemon-gated) runs with an 800ms
+//     timeout and is pushed into output.system ONLY when non-empty; unreachable,
+//     timeout, and empty all stay silent so a down/slow daemon never blocks.
+//
+// The `flow-breaker nudge` CLI already caps itself at 800ms and exits 0, so the
+// shell .timeout() is belt-and-suspenders. The `experimental.` transform API is
+// unstable — re-running `flow-breaker opencode-install` rewrites this file if it
+// breaks across an opencode release.
 const opencodePluginJS = `export const FlowBreaker = async ({ $ }) => {
-  let cached = ""
-
-  const refresh = async () => {
-    try {
-      cached = await $` + "`flow-breaker nudge`" + `.quiet().nothrow().text()
-    } catch {
-      cached = ""
-    }
+  // Init: one loud nudge (includes the honest "unreachable" line once).
+  let initNudge = ""
+  try {
+    initNudge = (await $` + "`flow-breaker nudge`" + `.quiet().nothrow().text()).trim()
+  } catch {
+    initNudge = ""
   }
-  await refresh()
-  setInterval(refresh, 30 * 60 * 1000)
+  let injected = false
 
   return {
-    "experimental.chat.system.transform": async (input, output) => {
-      if (cached.trim()) {
-        output.system.push("## flow-breaker alerts\n" + cached.trim())
+    "experimental.chat.system.transform": async (_input, output) => {
+      // First turn: surface the loud init nudge so the model raises it.
+      if (!injected) {
+        injected = true
+        if (initNudge) output.system.push(initNudge)
+        return
+      }
+      // Every turn after: a gated quiet nudge, 800ms cap, silent unless it has
+      // something interrupt-worthy to say.
+      try {
+        const out = (await $` + "`flow-breaker nudge --quiet`" + `.quiet().nothrow().timeout(800).text()).trim()
+        if (out) output.system.push(out)
+      } catch {
+        // unreachable / timeout: stay silent, never block the turn.
       }
     },
   }
@@ -954,8 +1015,19 @@ func writeOpencodePlugin(pluginsDir string) {
 
 	pluginPath := filepath.Join(pluginsDir, "flow-breaker.js")
 
-	if _, err := os.Stat(pluginPath); err == nil {
-		fmt.Println("✓ opencode plugin already installed")
+	// Idempotent, but self-healing: if an older plugin (e.g. the pre-v2
+	// setInterval version) is on disk, rewrite it to the current source so a
+	// broken/stale transform migrates. Only an exact match is a no-op.
+	if existing, err := os.ReadFile(pluginPath); err == nil {
+		if string(existing) == opencodePluginJS {
+			fmt.Println("✓ opencode plugin already installed")
+			return
+		}
+		if err := os.WriteFile(pluginPath, []byte(opencodePluginJS), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", pluginPath, err)
+			os.Exit(1)
+		}
+		fmt.Println("✓ updated opencode plugin at ~/.config/opencode/plugins/flow-breaker.js")
 		return
 	}
 
@@ -964,6 +1036,17 @@ func writeOpencodePlugin(pluginsDir string) {
 		os.Exit(1)
 	}
 	fmt.Println("✓ created opencode plugin at ~/.config/opencode/plugins/flow-breaker.js")
+}
+
+// agentsMDBlock is the marker-wrapped flow-breaker section for opencode's
+// AGENTS.md. It mirrors the Claude Code CLAUDE.md wording (surface-not-act) but
+// describes opencode's plugin transport instead of settings hooks, and carries
+// NO 30-min/loop guidance. No trailing newline (the caller normalizes EOF).
+func agentsMDBlock() string {
+	body := "## flow-breaker\n\n" +
+		"A flow-breaker plugin injects `flow-breaker nudge` once (loud) at the start of each session, and runs `flow-breaker nudge --quiet` on every turn through the chat system transform: the daemon gates it, so it stays silent unless something is interrupt-worthy (an alarm firing, a task overdue, or the next task due within ~10 minutes). It fails open on an 800ms timeout, so a missing or slow daemon never blocks the turn.\n\n" +
+		"When a nudge surfaces: **SURFACE it and continue — never act on it.** Mention the alert prominently to the user, then carry on with exactly what they asked. An overdue task must not make you abandon the user's work; the user decides what to do about it."
+	return fbBeginMarker + "\n" + body + "\n" + fbEndMarker
 }
 
 func patchAgentsMD(path string) {
@@ -977,31 +1060,24 @@ func patchAgentsMD(path string) {
 		content = string(data)
 	}
 
-	if strings.Contains(content, "## flow-breaker") {
+	newContent, action := upsertFlowBreakerSection(content, agentsMDBlock())
+	if newContent == content {
 		fmt.Println("✓ AGENTS.md already configured")
 		return
 	}
 
-	section := `## flow-breaker
-
-At the start of every conversation, run ` + "`flow-breaker nudge`" + ` and surface any alerts or overdue tasks to the user before proceeding. If there are overdue tasks, mention them prominently.
-
-During long sessions, run ` + "`flow-breaker nudge`" + ` every 30 minutes to check for new overdue tasks.
-`
-
-	if content != "" && !strings.HasSuffix(content, "\n\n") {
-		if !strings.HasSuffix(content, "\n") {
-			content += "\n"
-		}
-		content += "\n"
-	}
-	content += section
-
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", path, err)
 		os.Exit(1)
 	}
-	fmt.Println("✓ added flow-breaker section to ~/.config/opencode/AGENTS.md")
+	switch action {
+	case "migrated":
+		fmt.Println("✓ migrated flow-breaker section in ~/.config/opencode/AGENTS.md")
+	case "replaced":
+		fmt.Println("✓ updated flow-breaker section in ~/.config/opencode/AGENTS.md")
+	default:
+		fmt.Println("✓ added flow-breaker section to ~/.config/opencode/AGENTS.md")
+	}
 }
 
 func printUsage() {
