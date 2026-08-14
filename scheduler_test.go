@@ -1,168 +1,273 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
 
-// schedNow is a fixed reference instant used across scheduler tests so firing is
-// evaluated deterministically (never against the wall clock).
+// schedNow is a fixed reference instant used across scheduler tests so ladders
+// are evaluated deterministically (never against the wall clock).
 var schedNow = time.Date(2026, 1, 5, 10, 0, 30, 0, time.Local) // a Monday, 10:00:30
 
 // dueTask builds a Daily task whose HH:MM is `offset` away from schedNow.
 func dueTask(id int, offset time.Duration) Task {
-	return Task{ID: id, Time: schedNow.Add(offset).Format("15:04"), Recurrence: Daily}
+	return Task{ID: id, Time: schedNow.Add(offset).Format("15:04"), Recurrence: Daily, Desc: "task"}
 }
 
-func TestTickFiresTaskInWindow(t *testing.T) {
-	// Task time 10:00; now 10:00:30 → due 30s ago, inside [-2min, 0].
-	task := dueTask(1, 0) // "10:00"
-	store := &Store{Tasks: []Task{task}, NextID: 2}
+// spyPub records publish calls; spyTg records telegram calls. A scheduler wired
+// with these never touches the network.
+type pubCall struct {
+	prio    int
+	title   string
+	body    string
+	actions []NtfyAction
+}
+
+type spy struct {
+	mu   sync.Mutex
+	pubs []pubCall
+	tgs  []string
+}
+
+func (s *spy) wire(sc *scheduler) {
+	sc.publish = func(_ context.Context, prio int, title, body string, actions []NtfyAction) error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.pubs = append(s.pubs, pubCall{prio, title, body, actions})
+		return nil
+	}
+	sc.telegram = func(_ context.Context, text string) error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.tgs = append(s.tgs, text)
+		return nil
+	}
+}
+
+func (s *spy) pubCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pubs)
+}
+
+func (s *spy) lastPub() pubCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pubs[len(s.pubs)-1]
+}
+
+func (s *spy) tgCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tgs)
+}
+
+func newSpyScheduler(store *Store) (*scheduler, *spy) {
 	sc := newScheduler(store)
+	sp := &spy{}
+	sp.wire(sc)
+	return sc, sp
+}
+
+// TestLadderProgression drives one ladder through the full escalation ladder.
+func TestLadderProgression(t *testing.T) {
+	task := dueTask(1, 0) // due now
+	store := &Store{Tasks: []Task{task}, NextID: 2, Settings: defaultSettings()}
+	sc, sp := newSpyScheduler(store)
+
+	// t=0 → publish p3 with Done+Snooze actions (no public URL → nil actions, so
+	// set one to assert action shape).
+	t.Setenv("FLOW_BREAKER_PUBLIC_URL", "https://pi.example")
+	sc.tickOnce(schedNow)
+	if sp.pubCount() != 1 {
+		t.Fatalf("t=0: pubCount = %d, want 1", sp.pubCount())
+	}
+	p := sp.lastPub()
+	if p.prio != 3 {
+		t.Fatalf("t=0: prio = %d, want 3", p.prio)
+	}
+	if len(p.actions) != 2 || p.actions[0].Label != "Done" || p.actions[1].Label != "Snooze" {
+		t.Fatalf("t=0: actions = %+v, want Done+Snooze", p.actions)
+	}
+	if p.title != "Flow Breaker" {
+		t.Fatalf("t=0: title = %q", p.title)
+	}
+
+	// t=+30s → no republish.
+	sc.tickOnce(schedNow.Add(30 * time.Second))
+	if sp.pubCount() != 1 {
+		t.Fatalf("t=+30s: pubCount = %d, want 1 (no republish)", sp.pubCount())
+	}
+
+	// t=+60s → republish (still p3).
+	sc.tickOnce(schedNow.Add(60 * time.Second))
+	if sp.pubCount() != 2 {
+		t.Fatalf("t=+60s: pubCount = %d, want 2", sp.pubCount())
+	}
+	if sp.lastPub().prio != 3 {
+		t.Fatalf("t=+60s: prio = %d, want 3", sp.lastPub().prio)
+	}
+
+	// t=+3m → prio 4.
+	sc.tickOnce(schedNow.Add(3 * time.Minute))
+	if got := sp.lastPub().prio; got != 4 {
+		t.Fatalf("t=+3m: prio = %d, want 4", got)
+	}
+
+	// t=+6m → prio 5.
+	sc.tickOnce(schedNow.Add(6 * time.Minute))
+	if got := sp.lastPub().prio; got != 5 {
+		t.Fatalf("t=+6m: prio = %d, want 5", got)
+	}
+
+	// t=+10m → telegram once.
+	sc.tickOnce(schedNow.Add(10 * time.Minute))
+	if sp.tgCount() != 1 {
+		t.Fatalf("t=+10m: tgCount = %d, want 1", sp.tgCount())
+	}
+	// t=+11m → not twice.
+	sc.tickOnce(schedNow.Add(11 * time.Minute))
+	if sp.tgCount() != 1 {
+		t.Fatalf("t=+11m: tgCount = %d, want still 1", sp.tgCount())
+	}
+
+	// t=+15m → terminal: auto-snoozed (not missed), ladder gone.
+	sc.tickOnce(schedNow.Add(15 * time.Minute))
+	if _, ok := sc.ladders[1]; ok {
+		t.Fatalf("t=+15m: ladder still present, want gone")
+	}
+	store.mu.RLock()
+	snoozed := store.Tasks[0].Snoozed
+	missed := store.Tasks[0].Missed
+	store.mu.RUnlock()
+	if missed {
+		t.Fatalf("t=+15m: task Missed, want auto-snoozed on first run")
+	}
+	// snoozeTask uses wall clock; assert it was set ~30m out from now.
+	if snoozed < time.Now().Add(28*time.Minute).Unix() {
+		t.Fatalf("t=+15m: Snoozed = %d, want ~+30m", snoozed)
+	}
+	if !sc.autoSnoozed[1] {
+		t.Fatalf("t=+15m: autoSnoozed[1] = false, want true")
+	}
+
+	// Snooze lapses → simulate by clearing Snoozed → a fresh ladder is created,
+	// and because it already auto-snoozed once, its terminal → Missed.
+	store.mu.Lock()
+	store.Tasks[0].Snoozed = 0
+	store.mu.Unlock()
+
+	reNow := schedNow.Add(16 * time.Minute)
+	sc.tickOnce(reNow)
+	l, ok := sc.ladders[1]
+	if !ok {
+		t.Fatalf("after lapse: no new ladder, want p3 ladder")
+	}
+	if l.prio != 3 {
+		t.Fatalf("after lapse: prio = %d, want 3 (fresh ladder)", l.prio)
+	}
+
+	// Its +15m → task Missed, ladder gone.
+	sc.tickOnce(reNow.Add(15 * time.Minute))
+	if _, ok := sc.ladders[1]; ok {
+		t.Fatalf("second terminal: ladder still present, want gone")
+	}
+	store.mu.RLock()
+	missed = store.Tasks[0].Missed
+	store.mu.RUnlock()
+	if !missed {
+		t.Fatalf("second terminal: task not Missed, want Missed")
+	}
+}
+
+// TestIndependentLadders: two past-due tasks → two ladders, each publishes.
+func TestIndependentLadders(t *testing.T) {
+	store := &Store{
+		Tasks:    []Task{dueTask(1, 0), dueTask(2, -time.Minute)},
+		NextID:   3,
+		Settings: defaultSettings(),
+	}
+	sc, sp := newSpyScheduler(store)
 
 	sc.tickOnce(schedNow)
 
-	if sc.firingID != 1 {
-		t.Fatalf("firingID = %d, want 1", sc.firingID)
+	if len(sc.ladders) != 2 {
+		t.Fatalf("ladders = %d, want 2", len(sc.ladders))
 	}
-	if !sc.fired[1] {
-		t.Fatalf("fired[1] = false, want true")
-	}
-}
-
-func TestTickIgnoresTaskOutsideWindow(t *testing.T) {
-	// Task time 9:57; now 10:00:30 → due ~3.5min ago, outside the -2min window.
-	task := dueTask(1, -3*time.Minute-time.Minute) // ~4 min earlier
-	store := &Store{Tasks: []Task{task}, NextID: 2}
-	sc := newScheduler(store)
-
-	sc.tickOnce(schedNow)
-
-	if sc.firingID != 0 {
-		t.Fatalf("firingID = %d, want 0 (past window)", sc.firingID)
-	}
-	if sc.fired[1] {
-		t.Fatalf("fired[1] = true, want false")
+	if sp.pubCount() != 2 {
+		t.Fatalf("pubCount = %d, want 2 (one per task)", sp.pubCount())
 	}
 }
 
-func TestTickRefiresAfterDayRollover(t *testing.T) {
-	// A Daily task fires today, then re-fires at the same wall-time next day
-	// (the fired map must reset at the day boundary).
-	task := dueTask(1, 0)
-	store := &Store{Tasks: []Task{task}, NextID: 2}
-	sc := newScheduler(store)
+// TestAckTeardown: a firing task marked Done → next tick prunes its ladder.
+func TestAckTeardown(t *testing.T) {
+	store := &Store{Tasks: []Task{dueTask(1, 0)}, NextID: 2, Settings: defaultSettings()}
+	sc, sp := newSpyScheduler(store)
 
 	sc.tickOnce(schedNow)
-	if sc.firingID != 1 || !sc.fired[1] {
-		t.Fatalf("day 1: firingID=%d fired[1]=%v, want 1/true", sc.firingID, sc.fired[1])
+	if _, ok := sc.ladders[1]; !ok {
+		t.Fatalf("precondition: no ladder")
 	}
+	before := sp.pubCount()
 
-	// Simulate the alarm being acked (done) so firing clears, then advance the
-	// clock 24h to the same wall-time the next day.
 	store.mu.Lock()
 	store.Tasks[0].Done = true
 	store.mu.Unlock()
-	next := schedNow.Add(24 * time.Hour)
-	sc.tickOnce(next) // clears the stale firing
 
-	// Reset done (a real daily reset would clear it) and tick again next day.
-	store.mu.Lock()
-	store.Tasks[0].Done = false
-	store.mu.Unlock()
-	sc.tickOnce(next)
-
-	if sc.firingID != 1 || !sc.fired[1] {
-		t.Fatalf("day 2: firingID=%d fired[1]=%v, want 1/true (re-fired next day)", sc.firingID, sc.fired[1])
+	sc.tickOnce(schedNow.Add(60 * time.Second))
+	if _, ok := sc.ladders[1]; ok {
+		t.Fatalf("ladder still present after Done, want pruned")
+	}
+	if sp.pubCount() != before {
+		t.Fatalf("published after Done: %d → %d, want no new publish", before, sp.pubCount())
 	}
 }
 
-func TestTickIgnoresFutureTask(t *testing.T) {
-	task := dueTask(1, 30*time.Minute) // future
-	store := &Store{Tasks: []Task{task}, NextID: 2}
-	sc := newScheduler(store)
+// TestRestartReconstruction: a fresh scheduler + past-due unacked task → one tick
+// creates a p3 ladder. A Missed task → no ladder.
+func TestRestartReconstruction(t *testing.T) {
+	store := &Store{Tasks: []Task{dueTask(1, -20*time.Minute)}, NextID: 2, Settings: defaultSettings()}
+	sc, _ := newSpyScheduler(store)
 
 	sc.tickOnce(schedNow)
+	l, ok := sc.ladders[1]
+	if !ok {
+		t.Fatalf("past-due task: no ladder, want p3 reconstruction")
+	}
+	if l.prio != 3 {
+		t.Fatalf("reconstructed ladder prio = %d, want 3", l.prio)
+	}
 
-	if sc.firingID != 0 {
-		t.Fatalf("firingID = %d, want 0 (future task)", sc.firingID)
+	// Missed task → excluded, no ladder.
+	store2 := &Store{
+		Tasks:    []Task{{ID: 5, Time: schedNow.Format("15:04"), Recurrence: Daily, Missed: true}},
+		NextID:   6,
+		Settings: defaultSettings(),
+	}
+	sc2, sp2 := newSpyScheduler(store2)
+	sc2.tickOnce(schedNow)
+	if len(sc2.ladders) != 0 {
+		t.Fatalf("missed task: ladders = %d, want 0", len(sc2.ladders))
+	}
+	if sp2.pubCount() != 0 {
+		t.Fatalf("missed task: published %d, want 0", sp2.pubCount())
 	}
 }
 
-func TestTickClearsFiringWhenDone(t *testing.T) {
-	task := dueTask(1, 0)
-	store := &Store{Tasks: []Task{task}, NextID: 2}
-	sc := newScheduler(store)
-
-	sc.tickOnce(schedNow)
-	if sc.firingID != 1 {
-		t.Fatalf("precondition: firingID = %d, want 1", sc.firingID)
-	}
-
-	// Ack the alarm out-of-band (as POST /task/{id}/done would).
-	store.mu.Lock()
-	store.Tasks[0].Done = true
-	store.mu.Unlock()
-
-	sc.tickOnce(schedNow)
-	if sc.firingID != 0 {
-		t.Fatalf("firingID = %d, want 0 after task marked done", sc.firingID)
-	}
-}
-
-func TestTickClearsFiringWhenSnoozed(t *testing.T) {
-	// Firing task then snoozed → alarm clears, and fired flag is dropped so it
-	// re-fires once the snooze lapses.
-	task := dueTask(1, 0)
-	store := &Store{Tasks: []Task{task}, NextID: 2}
-	sc := newScheduler(store)
-
-	sc.tickOnce(schedNow)
-	if sc.firingID != 1 {
-		t.Fatalf("precondition: firingID = %d, want 1", sc.firingID)
-	}
-
-	store.mu.Lock()
-	store.Tasks[0].Snoozed = schedNow.Add(5 * time.Minute).Unix()
-	store.mu.Unlock()
-
-	sc.tickOnce(schedNow)
-	if sc.firingID != 0 {
-		t.Fatalf("firingID = %d, want 0 while snoozed", sc.firingID)
-	}
-	if sc.fired[1] {
-		t.Fatalf("fired[1] = true, want false (cleared while snoozed)")
-	}
-}
-
-func TestTickSnoozedTaskNotFiring(t *testing.T) {
-	task := dueTask(1, 0)
-	task.Snoozed = schedNow.Add(5 * time.Minute).Unix()
-	store := &Store{Tasks: []Task{task}, NextID: 2}
-	sc := newScheduler(store)
-	sc.fired[1] = true // pretend it fired earlier today
-
-	sc.tickOnce(schedNow)
-
-	if sc.firingID != 0 {
-		t.Fatalf("firingID = %d, want 0 (snoozed)", sc.firingID)
-	}
-	if sc.fired[1] {
-		t.Fatalf("fired[1] = true, want cleared while snoozed")
-	}
-}
-
+// TestStatusReportsFiring: /status reports the ladder's task as firing.
 func TestStatusReportsFiring(t *testing.T) {
 	task := dueTask(7, 0)
-	store := &Store{Tasks: []Task{task}, NextID: 8}
-	sc := newScheduler(store)
+	store := &Store{Tasks: []Task{task}, NextID: 8, Settings: defaultSettings()}
+	sc, _ := newSpyScheduler(store)
 
 	sc.tickOnce(schedNow)
-	if sc.firingID != 7 {
-		t.Fatalf("precondition: firingID = %d, want 7", sc.firingID)
+	if sc.firing() != 7 {
+		t.Fatalf("precondition: firing() = %d, want 7", sc.firing())
 	}
 
 	srv := httptest.NewServer(newDaemonMux(store, sc))
@@ -186,12 +291,12 @@ func TestStatusReportsFiring(t *testing.T) {
 	}
 }
 
+// TestStatusClearsStaleFiring: firing() points at a task that no longer exists →
+// status reports no alarm and clears the stale ladder.
 func TestStatusClearsStaleFiring(t *testing.T) {
-	// firingID points at a task that no longer exists → status reports no alarm
-	// and clears the stale state.
-	store := &Store{Tasks: []Task{}, NextID: 1}
-	sc := newScheduler(store)
-	sc.firingID = 42 // stale
+	store := &Store{Tasks: []Task{}, NextID: 1, Settings: defaultSettings()}
+	sc, _ := newSpyScheduler(store)
+	sc.ladders[42] = &ladder{firedAt: schedNow, prio: 3} // stale
 
 	srv := httptest.NewServer(newDaemonMux(store, sc))
 	defer srv.Close()
@@ -210,6 +315,24 @@ func TestStatusClearsStaleFiring(t *testing.T) {
 		t.Fatalf("alarm_firing = true, want false for missing task")
 	}
 	if sc.firing() != 0 {
-		t.Fatalf("stale firingID = %d, want cleared", sc.firing())
+		t.Fatalf("stale ladder = %d, want cleared", sc.firing())
+	}
+}
+
+// TestResetDailyClearsMissed: the daily reset clears the Missed flag.
+func TestResetDailyClearsMissed(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_BREAKER_DIR", dir)
+	store := &Store{
+		Tasks:     []Task{{ID: 1, Time: "10:00", Recurrence: Daily, Missed: true}},
+		NextID:    2,
+		LastReset: "2020-01-01", // force a reset
+		Settings:  defaultSettings(),
+	}
+	store.resetDaily()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if store.Tasks[0].Missed {
+		t.Fatalf("Missed = true after resetDaily, want cleared")
 	}
 }

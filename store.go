@@ -34,6 +34,7 @@ type Task struct {
 	Days       []string        `json:"days,omitempty"`
 	Done       bool            `json:"done"`
 	Dismissed  bool            `json:"dismissed"`
+	Missed     bool            `json:"missed,omitempty"` // escalation ladder gave up after a 2nd run
 	Snoozed    int64           `json:"snoozed"`
 	Tags       []string        `json:"tags,omitempty"`
 	CreatedAt  string          `json:"created_at"`
@@ -280,6 +281,22 @@ func (s *Store) snoozeTask(id int, minutes int, source string) (Task, error) {
 	return s.Tasks[i], nil
 }
 
+// markMissed sets Missed=true and persists. Returns the updated task, or an
+// error if the id is not found. Acquires the write lock once. Used by the
+// escalation ladder's terminal step when a task has already auto-snoozed once:
+// the second ladder gives up and the task is recorded as missed (no more push).
+func (s *Store) markMissed(id int) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, err := s.findTaskByID(id)
+	if err != nil {
+		return Task{}, err
+	}
+	s.Tasks[i].Missed = true
+	s.saveLocked()
+	return s.Tasks[i], nil
+}
+
 // editTaskSource applies each non-nil field to the task, stamps Source, and
 // persists. A nil pointer leaves that field unchanged (partial edit). Returns
 // the updated task or an error if the id is not found. Acquires the write lock
@@ -516,6 +533,7 @@ func (s *Store) resetDaily() {
 		}
 		s.Tasks[i].Done = false
 		s.Tasks[i].Dismissed = false
+		s.Tasks[i].Missed = false
 		s.Tasks[i].Snoozed = 0
 	}
 	s.LastReset = today
@@ -547,7 +565,7 @@ func shouldFireToday(t Task) bool {
 // shouldFireTodayAt is shouldFireToday with an injectable clock (used by the
 // daemon scheduler so firing can be evaluated deterministically). This is the
 // single date-gate: a task carrying an explicit future/past Date never fires on
-// any other day, so the scheduler (via meetsFireWindow) and buildStatus (via
+// any other day, so the scheduler (via escalationEligible) and buildStatus (via
 // shouldFireToday) agree.
 func shouldFireTodayAt(t Task, now time.Time) bool {
 	if t.Archived {
