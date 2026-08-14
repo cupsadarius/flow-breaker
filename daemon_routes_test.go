@@ -691,3 +691,14 @@ func TestInterruptWorthyAlarm(t *testing.T) {
 		t.Fatal("next-in-1h report should NOT be interrupt-worthy")
 	}
 }
+
+// TestInterruptWorthyBoundary pins the gate at the 600s edge: the spec is
+// strictly < 600, so 600 is NOT interrupt-worthy but 599 is.
+func TestInterruptWorthyBoundary(t *testing.T) {
+	if interruptWorthy(StatusReport{Next: &TaskStatus{Seconds: 600}}) {
+		t.Fatal("Next.Seconds == 600 should NOT be interrupt-worthy (spec is < 600)")
+	}
+	if !interruptWorthy(StatusReport{Next: &TaskStatus{Seconds: 599}}) {
+		t.Fatal("Next.Seconds == 599 should be interrupt-worthy")
+	}
+}

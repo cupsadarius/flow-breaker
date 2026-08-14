@@ -18,6 +18,10 @@ func main() {
 			cliArchive()
 		case "done":
 			cliDone(os.Args[2:])
+		case "capture":
+			cliCapture(os.Args[2:])
+		case "snooze":
+			cliSnooze(os.Args[2:])
 		case "clear":
 			cliClear()
 		case "status":

@@ -285,3 +285,79 @@ func TestCliSource(t *testing.T) {
 		}
 	})
 }
+
+// TestCaptureWithClientSuccess: capture prints the daemon's echo.
+func TestCaptureWithClientSuccess(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	if err := captureWithClient(testClient(srv), "call the plumber", &buf); err != nil {
+		t.Fatalf("captureWithClient: %v", err)
+	}
+	if strings.TrimSpace(buf.String()) == "" {
+		t.Fatal("capture printed no echo")
+	}
+	if !strings.Contains(buf.String(), "call the plumber") {
+		t.Fatalf("capture echo = %q, want it to mention the text", buf.String())
+	}
+	if len(store.Inbox) != 1 {
+		t.Fatalf("capture did not reach the store: inbox=%d", len(store.Inbox))
+	}
+}
+
+// TestCaptureWithClientUnreachable: capture must fail LOUD (return ErrDaemonDown)
+// so a dropped capture is never silently swallowed.
+func TestCaptureWithClientUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	c := &Client{BaseURL: url, http: &http.Client{}}
+
+	var buf bytes.Buffer
+	err := captureWithClient(c, "call the plumber", &buf)
+	if !errors.Is(err, ErrDaemonDown) {
+		t.Fatalf("captureWithClient unreachable err = %v, want ErrDaemonDown", err)
+	}
+	if buf.String() != "" {
+		t.Fatalf("capture should print nothing to out on failure, got %q", buf.String())
+	}
+}
+
+// TestSnoozeWithClientPostsRoute: snooze hits /task/{id}/snooze with the id and
+// optional minutes, and reports the snoozed task.
+func TestSnoozeWithClientPostsRoute(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /task/{id}/snooze", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "task": Task{ID: 7, Time: "09:00", Desc: "standup"}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	if err := snoozeWithClient(testClient(srv), []string{"7", "15"}, &buf); err != nil {
+		t.Fatalf("snoozeWithClient: %v", err)
+	}
+	if gotPath != "/task/7/snooze" {
+		t.Fatalf("posted to %q, want /task/7/snooze", gotPath)
+	}
+	if gotBody["minutes"] != float64(15) {
+		t.Fatalf("minutes = %v, want 15", gotBody["minutes"])
+	}
+	if !strings.Contains(buf.String(), "standup") {
+		t.Fatalf("snooze output = %q, want the task", buf.String())
+	}
+}
+
+// TestSnoozeWithClientBadID: a non-integer id errors without hitting the daemon.
+func TestSnoozeWithClientBadID(t *testing.T) {
+	var buf bytes.Buffer
+	if err := snoozeWithClient(&Client{}, []string{"not-an-id"}, &buf); err == nil {
+		t.Fatal("expected an error for a non-integer id")
+	}
+}

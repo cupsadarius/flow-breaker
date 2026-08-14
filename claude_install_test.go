@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -63,10 +64,11 @@ func TestPatchSettingsGranularFailClosed(t *testing.T) {
 	for _, want := range []string{
 		"Bash(flow-breaker nudge:*)",
 		"Bash(flow-breaker status:*)",
-		"Bash(flow-breaker next:*)",
-		"Bash(flow-breaker overdue:*)",
-		"Bash(flow-breaker alarm:*)",
-		"Bash(flow-breaker calendar:*)",
+		"Bash(flow-breaker list:*)",
+		"Bash(flow-breaker ls:*)",
+		"Bash(flow-breaker archive:*)",
+		"Bash(flow-breaker cal-list:*)",
+		"Bash(flow-breaker cal-feeds:*)",
 		"Bash(flow-breaker capture:*)",
 		"Bash(flow-breaker add:*)",
 	} {
@@ -79,6 +81,21 @@ func TestPatchSettingsGranularFailClosed(t *testing.T) {
 		if strings.Contains(a, "flow-breaker *") || strings.Contains(a, "flow-breaker:*") {
 			t.Fatalf("allow contains a dangerous wildcard %q", a)
 		}
+	}
+	// Every granted name must be a subcommand main.go actually dispatches — no
+	// phantom perms (next/overdue/alarm/calendar were never wired).
+	dispatched := dispatchedSubcommands(t)
+	for _, list := range [][]string{allow, permStrings(t, s, "ask"), permStrings(t, s, "deny")} {
+		for _, p := range list {
+			cmd := strings.TrimSuffix(strings.TrimPrefix(p, "Bash(flow-breaker "), ":*)")
+			if !dispatched[cmd] {
+				t.Fatalf("permission %q names %q, which main.go does not dispatch", p, cmd)
+			}
+		}
+	}
+	// The marquee capture path (and snooze) must actually dispatch now.
+	if !dispatched["capture"] || !dispatched["snooze"] {
+		t.Fatalf("main.go must dispatch capture and snooze; dispatched=%v", dispatched)
 	}
 
 	ask := permStrings(t, s, "ask")
@@ -128,9 +145,95 @@ func TestPatchSettingsIdempotent(t *testing.T) {
 	if n := countHooks(t, s, "UserPromptSubmit"); n != 1 {
 		t.Fatalf("UserPromptSubmit hooks = %d, want 1 (no duplicate)", n)
 	}
-	// allow has exactly the 8 entries, no dupes.
-	if got := len(permStrings(t, s, "allow")); got != 8 {
-		t.Fatalf("allow len = %d, want 8 (no duplicates)", got)
+	// allow has exactly the 9 granted entries, no dupes.
+	if got := len(permStrings(t, s, "allow")); got != 9 {
+		t.Fatalf("allow len = %d, want 9 (no duplicates)", got)
+	}
+}
+
+// dispatchedSubcommands parses the case labels in main.go so tests can assert
+// permissions name only real, wired subcommands.
+func dispatchedSubcommands(t *testing.T) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	caseRe := regexp.MustCompile(`(?m)^\s*case\s+(.+):`)
+	tokRe := regexp.MustCompile(`"([^"]+)"`)
+	set := map[string]bool{}
+	for _, line := range caseRe.FindAllStringSubmatch(string(data), -1) {
+		for _, tok := range tokRe.FindAllStringSubmatch(line[1], -1) {
+			set[tok[1]] = true
+		}
+	}
+	return set
+}
+
+// TestPatchSettingsPrunesStaleNudgePerm verifies the pre-v2 no-colon pattern is
+// removed on upgrade, leaving only the granular Bash(flow-breaker nudge:*).
+func TestPatchSettingsPrunesStaleNudgePerm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	seed := map[string]interface{}{
+		"permissions": map[string]interface{}{
+			"allow": []interface{}{"Bash(flow-breaker nudge*)"},
+		},
+	}
+	data, _ := json.MarshalIndent(seed, "", "  ")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	patchSettings(path)
+	allow := permStrings(t, readSettings(t, path), "allow")
+	if contains(allow, "Bash(flow-breaker nudge*)") {
+		t.Fatalf("stale no-colon perm not pruned; got %v", allow)
+	}
+	if !contains(allow, "Bash(flow-breaker nudge:*)") {
+		t.Fatalf("granular nudge perm missing; got %v", allow)
+	}
+}
+
+// TestPatchClaudeMDMigratesOldSection seeds an OLD unmarked section (with the
+// removed 30-min/loop guidance) and verifies install migrates it in place: the
+// stale text is gone, the surface-not-act text is present, and a second run is a
+// no-op.
+func TestPatchClaudeMDMigratesOldSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "CLAUDE.md")
+	old := "# My notes\n\nSome preamble.\n\n" +
+		"## flow-breaker\n\n" +
+		"At the start of every conversation, run `flow-breaker nudge`.\n\n" +
+		"During long sessions, run it every 30 minutes. Use `/loop 30m flow-breaker nudge` to automate this.\n\n" +
+		"## other section\n\nKeep me.\n"
+	if err := os.WriteFile(path, []byte(old), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	patchClaudeMD(path)
+	got, _ := os.ReadFile(path)
+	content := string(got)
+
+	if strings.Contains(content, "every 30 minutes") || strings.Contains(content, "/loop") {
+		t.Fatalf("old 30-min/loop guidance not migrated away:\n%s", content)
+	}
+	if !strings.Contains(content, "never act on it") {
+		t.Fatalf("migrated section missing surface-not-act text:\n%s", content)
+	}
+	if !strings.Contains(content, "## other section") || !strings.Contains(content, "Some preamble.") {
+		t.Fatalf("migration clobbered the user's other content:\n%s", content)
+	}
+	if strings.Count(content, "## flow-breaker") != 1 {
+		t.Fatalf("expected exactly one flow-breaker heading:\n%s", content)
+	}
+	if !strings.Contains(content, fbBeginMarker) || !strings.Contains(content, fbEndMarker) {
+		t.Fatalf("migrated section not wrapped in markers:\n%s", content)
+	}
+
+	// Second run is a no-op.
+	patchClaudeMD(path)
+	again, _ := os.ReadFile(path)
+	if string(again) != content {
+		t.Fatalf("second run changed the file (not idempotent):\n%s", string(again))
 	}
 }
 

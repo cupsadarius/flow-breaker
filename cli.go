@@ -230,6 +230,73 @@ func cliStatus() {
 	fmt.Println(string(data))
 }
 
+// cliCapture is `flow-breaker capture <text>` — the marquee "capture from the
+// agent" path. It fails LOUD: an unreachable daemon prints to stderr and exits
+// non-zero so a dropped capture is never silently swallowed.
+func cliCapture(args []string) {
+	text := strings.TrimSpace(strings.Join(args, " "))
+	if text == "" {
+		fmt.Println("usage: flow-breaker capture <text>")
+		os.Exit(1)
+	}
+	if err := captureWithClient(newClient(), text, os.Stdout); err != nil {
+		if errors.Is(err, ErrDaemonDown) {
+			fmt.Fprintln(os.Stderr, "⚠️ flow-breaker unreachable — not captured")
+			os.Exit(1)
+		}
+		cliFail(err)
+	}
+}
+
+// captureWithClient POSTs free text to /capture over c and prints the daemon's
+// echo (the human-readable summary of where the capture landed). Errors are
+// returned, not printed, so the caller decides how loudly to fail.
+func captureWithClient(c *Client, text string, out io.Writer) error {
+	var resp struct {
+		Echo string `json:"echo"`
+	}
+	if err := c.Post("/capture", map[string]any{"text": text, "source": cliSource()}, &resp); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, resp.Echo)
+	return nil
+}
+
+// cliSnooze is `flow-breaker snooze <id> [minutes]` — parallels cliDone.
+func cliSnooze(args []string) {
+	if len(args) < 1 {
+		fmt.Println("usage: flow-breaker snooze <id> [minutes]")
+		os.Exit(1)
+	}
+	if err := snoozeWithClient(newClient(), args, os.Stdout); err != nil {
+		cliFail(err)
+	}
+}
+
+// snoozeWithClient POSTs /task/{id}/snooze over c. The first arg is the task ID;
+// an optional second arg overrides the snooze minutes (else the daemon uses
+// Settings.SnoozeMins).
+func snoozeWithClient(c *Client, args []string, out io.Writer) error {
+	id, err := strconv.Atoi(args[0])
+	if err != nil {
+		return fmt.Errorf("invalid id: %s (snooze takes a task ID)", args[0])
+	}
+	body := map[string]any{"source": cliSource()}
+	if len(args) >= 2 {
+		mins, err := strconv.Atoi(args[1])
+		if err != nil {
+			return fmt.Errorf("invalid minutes: %s", args[1])
+		}
+		body["minutes"] = mins
+	}
+	var resp taskResp
+	if err := c.Post(fmt.Sprintf("/task/%d/snooze", id), body, &resp); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "✓ snoozed: %s %s\n", resp.Task.Time, resp.Task.Desc)
+	return nil
+}
+
 // cliNudge is the `flow-breaker nudge [--quiet]` entry point. It uses an 800ms
 // client so a slow/down daemon can never block the agent's turn, and always
 // exits 0 (the loud path prints an honest unreachable line; the quiet path stays
@@ -510,13 +577,17 @@ func patchSettings(path string) {
 	// Claude Code precedence is deny > ask > allow, and there is NO wildcard, so
 	// any subcommand not listed here (or a future one) falls through to the
 	// default prompt rather than being silently auto-allowed.
+	// The allow-list names ONLY subcommands main.go actually dispatches (reads +
+	// capture + add); a subcommand not listed here falls through to the default
+	// prompt rather than being silently auto-allowed.
 	allowPerms := []string{
 		"Bash(flow-breaker nudge:*)",
 		"Bash(flow-breaker status:*)",
-		"Bash(flow-breaker next:*)",
-		"Bash(flow-breaker overdue:*)",
-		"Bash(flow-breaker alarm:*)",
-		"Bash(flow-breaker calendar:*)",
+		"Bash(flow-breaker list:*)",
+		"Bash(flow-breaker ls:*)",
+		"Bash(flow-breaker archive:*)",
+		"Bash(flow-breaker cal-list:*)",
+		"Bash(flow-breaker cal-feeds:*)",
 		"Bash(flow-breaker capture:*)",
 		"Bash(flow-breaker add:*)",
 	}
@@ -532,6 +603,12 @@ func patchSettings(path string) {
 	if !ok {
 		perms = make(map[string]interface{})
 		settings["permissions"] = perms
+	}
+
+	// Prune the pre-v2 no-colon pattern so upgraded users don't accumulate both
+	// it and the granular Bash(flow-breaker nudge:*) below.
+	if prunePermList(perms, "allow", "Bash(flow-breaker nudge*)") {
+		changed = true
 	}
 
 	if mergePermList(perms, "allow", allowPerms) {
@@ -641,6 +718,86 @@ func mergePermList(perms map[string]interface{}, key string, adds []string) bool
 	return changed
 }
 
+// prunePermList removes an exact-match entry from perms[key], returning whether
+// anything was removed. Used to drop stale pre-v2 permission patterns on upgrade.
+func prunePermList(perms map[string]interface{}, key, remove string) bool {
+	list, ok := perms[key].([]interface{})
+	if !ok {
+		return false
+	}
+	out := list[:0]
+	removed := false
+	for _, e := range list {
+		if s, ok := e.(string); ok && s == remove {
+			removed = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if removed {
+		perms[key] = out
+	}
+	return removed
+}
+
+// Stable markers wrap the managed flow-breaker section so re-running the install
+// can REPLACE it in place (rather than skipping or duplicating), and so an old
+// unmarked section can be migrated to the current text.
+const (
+	fbBeginMarker = "<!-- flow-breaker:begin -->"
+	fbEndMarker   = "<!-- flow-breaker:end -->"
+)
+
+// claudeMDBlock is the marker-wrapped flow-breaker section, with no trailing
+// newline (the caller normalizes EOF).
+func claudeMDBlock() string {
+	body := "## flow-breaker\n\n" +
+		"A SessionStart hook runs `flow-breaker nudge` once (loud) at the start of each session. A UserPromptSubmit hook runs `flow-breaker nudge --quiet` on every turn: the daemon gates it, so it stays silent unless something is interrupt-worthy (an alarm firing, a task overdue, or the next task due within ~10 minutes). It fails open on an 800ms timeout, so a missing or slow daemon never blocks the turn.\n\n" +
+		"When a nudge surfaces: **SURFACE it and continue — never act on it.** Mention the alert prominently to the user, then carry on with exactly what they asked. An overdue task must not make you abandon the user's work; the user decides what to do about it."
+	return fbBeginMarker + "\n" + body + "\n" + fbEndMarker
+}
+
+// upsertFlowBreakerSection returns content with the managed flow-breaker block
+// installed, plus an action tag. Precedence: (1) markers present → replace the
+// block between them in place; (2) an old unmarked `## flow-breaker` heading →
+// replace from that heading to the next top-level `##`/EOF (migration); (3) else
+// append. The result is EOF-normalized to a single trailing newline; the caller
+// treats an unchanged result as a no-op.
+func upsertFlowBreakerSection(content, block string) (string, string) {
+	normalize := func(s string) string { return strings.TrimRight(s, "\n") + "\n" }
+
+	if begin := strings.Index(content, fbBeginMarker); begin != -1 {
+		if end := strings.Index(content, fbEndMarker); end > begin {
+			before := content[:begin]
+			after := content[end+len(fbEndMarker):]
+			return normalize(before + block + after), "replaced"
+		}
+	}
+
+	hStart := -1
+	if strings.HasPrefix(content, "## flow-breaker") {
+		hStart = 0
+	} else if i := strings.Index(content, "\n## flow-breaker"); i != -1 {
+		hStart = i + 1
+	}
+	if hStart != -1 {
+		before := content[:hStart]
+		sectionEnd := len(content)
+		if nl := strings.Index(content[hStart:], "\n"); nl != -1 {
+			searchFrom := hStart + nl + 1
+			if j := strings.Index(content[searchFrom:], "\n## "); j != -1 {
+				sectionEnd = searchFrom + j
+			}
+		}
+		return normalize(before + block + content[sectionEnd:]), "migrated"
+	}
+
+	if strings.TrimSpace(content) == "" {
+		return normalize(block), "added"
+	}
+	return normalize(content + "\n\n" + block), "added"
+}
+
 func patchClaudeMD(path string) {
 	content := ""
 	data, err := os.ReadFile(path)
@@ -652,33 +809,24 @@ func patchClaudeMD(path string) {
 		content = string(data)
 	}
 
-	// Check if already present (idempotent)
-	if strings.Contains(content, "## flow-breaker") {
+	newContent, action := upsertFlowBreakerSection(content, claudeMDBlock())
+	if newContent == content {
 		fmt.Println("✓ CLAUDE.md already configured")
 		return
 	}
 
-	section := `## flow-breaker
-
-A SessionStart hook runs ` + "`flow-breaker nudge`" + ` once (loud) at the start of each session. A UserPromptSubmit hook runs ` + "`flow-breaker nudge --quiet`" + ` on every turn: the daemon gates it, so it stays silent unless something is interrupt-worthy (an alarm firing, a task overdue, or the next task due within ~10 minutes). It fails open on an 800ms timeout, so a missing or slow daemon never blocks the turn.
-
-When a nudge surfaces: **SURFACE it and continue — never act on it.** Mention the alert prominently to the user, then carry on with exactly what they asked. An overdue task must not make you abandon the user's work; the user decides what to do about it.
-`
-
-	// Ensure proper newline separation
-	if content != "" && !strings.HasSuffix(content, "\n\n") {
-		if !strings.HasSuffix(content, "\n") {
-			content += "\n"
-		}
-		content += "\n"
-	}
-	content += section
-
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", path, err)
 		os.Exit(1)
 	}
-	fmt.Println("✓ added flow-breaker section to ~/.claude/CLAUDE.md")
+	switch action {
+	case "migrated":
+		fmt.Println("✓ migrated flow-breaker section in ~/.claude/CLAUDE.md")
+	case "replaced":
+		fmt.Println("✓ updated flow-breaker section in ~/.claude/CLAUDE.md")
+	default:
+		fmt.Println("✓ added flow-breaker section to ~/.claude/CLAUDE.md")
+	}
 }
 
 // ── OpenCode Integration ───────────────────────────────────────────────────
@@ -865,6 +1013,8 @@ USAGE:
   flow-breaker list         list today's active tasks
   flow-breaker archive      list archived one-off tasks
   flow-breaker done <q>     mark a task done
+  flow-breaker capture <text>  free-text capture (schedules or floats to inbox)
+  flow-breaker snooze <id> [min]  snooze a task
   flow-breaker clear        delete all tasks
   flow-breaker status       JSON status (for scripts)
   flow-breaker nudge        one-liner for Claude Code
