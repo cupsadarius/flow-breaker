@@ -80,6 +80,38 @@ func handleDone(store *Store) http.HandlerFunc {
 	}
 }
 
+// handleDismiss handles POST /task/{id}/dismiss — set Dismissed=true. Mirrors
+// handleDone; used by the TUI's alarm dismiss and give-up actions.
+func handleDismiss(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		var body struct {
+			Source string `json:"source"`
+		}
+		json.NewDecoder(r.Body).Decode(&body) // body optional
+		t, err := store.dismissTask(id, defaultSource(body.Source))
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "task": t})
+	}
+}
+
+// handleGetSettings handles GET /settings — returns the store settings as JSON.
+// Writing settings (POST /settings) is deferred to Phase 6.
+func handleGetSettings(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		store.mu.RLock()
+		s := store.Settings
+		store.mu.RUnlock()
+		writeJSON(w, http.StatusOK, s)
+	}
+}
+
 // handleSnooze handles POST /task/{id}/snooze. minutes is optional; when
 // omitted (or <= 0) the store falls back to Settings.SnoozeMins.
 func handleSnooze(store *Store) http.HandlerFunc {

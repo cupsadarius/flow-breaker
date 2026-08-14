@@ -30,12 +30,14 @@ func newDaemonMux(store *Store, sc *scheduler) *http.ServeMux {
 	mux.HandleFunc("POST /task", handleAddTask(store))
 	mux.HandleFunc("POST /task/{id}/done", handleDone(store))
 	mux.HandleFunc("POST /task/{id}/snooze", handleSnooze(store))
+	mux.HandleFunc("POST /task/{id}/dismiss", handleDismiss(store))
 	mux.HandleFunc("POST /task/{id}", handleEdit(store))
 	mux.HandleFunc("DELETE /task/{id}", handleDelete(store))
 
 	// Read routes.
 	mux.HandleFunc("GET /tasks", handleTasks(store))
 	mux.HandleFunc("GET /status", handleStatus(store, sc))
+	mux.HandleFunc("GET /settings", handleGetSettings(store))
 
 	return mux
 }

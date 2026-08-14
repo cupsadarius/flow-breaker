@@ -151,6 +151,72 @@ func TestDoneRouteBadID(t *testing.T) {
 	}
 }
 
+func TestDismissRoute(t *testing.T) {
+	store := newTestStore(t)
+	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "cli")
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", fmt.Sprintf("%s/task/%d/dismiss", srv.URL, seed.ID), map[string]any{"source": "tui"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	m := decodeMap(t, resp)
+	if m["ok"] != true {
+		t.Fatalf("ok = %v, want true", m["ok"])
+	}
+	task := m["task"].(map[string]any)
+	if task["dismissed"] != true {
+		t.Fatalf("dismissed = %v, want true", task["dismissed"])
+	}
+	if task["source"] != "tui" {
+		t.Fatalf("source = %v, want tui", task["source"])
+	}
+	got := store.ActiveTasks()
+	if !got[0].Dismissed || got[0].Source != "tui" {
+		t.Fatalf("store not mutated: %+v", got[0])
+	}
+}
+
+func TestDismissRouteNotFound(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", srv.URL+"/task/999/dismiss", map[string]any{"source": "tui"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	m := decodeMap(t, resp)
+	if m["error"] == nil {
+		t.Fatalf("expected error field, got %v", m)
+	}
+}
+
+func TestGetSettingsRoute(t *testing.T) {
+	store := newTestStore(t)
+	store.Settings.SnoozeMins = 7
+	store.Settings.CalEnabled = true
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "GET", srv.URL+"/settings", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	var got Settings
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if got.SnoozeMins != 7 {
+		t.Fatalf("snooze_mins = %d, want 7", got.SnoozeMins)
+	}
+	if !got.CalEnabled {
+		t.Fatalf("cal_enabled = false, want true")
+	}
+}
+
 func TestSnoozeRoute(t *testing.T) {
 	store := newTestStore(t)
 	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")

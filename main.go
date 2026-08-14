@@ -48,30 +48,17 @@ func main() {
 		return
 	}
 
+	// The TUI is a pure HTTP client + viewer. loadStore seeds the read-only
+	// display cache (tasks + settings) from disk; each tick refreshes it from the
+	// daemon over HTTP. The daemon (flow-breaker daemon) is the sole writer.
 	s := loadStore()
-	s.resetDaily()
 	captureTmuxPane()
-	alarm := &alarmState{}
 
-	// start socket server
-	startSocketServer(s, alarm)
-	// write initial status
-	writeStatusFile(s, alarm)
-
-	m := model{
-		store: s,
-		alarm: alarm,
-		fired: make(map[int]bool),
-	}
-
-	m.checkOverdueOnStartup()
+	m := model{store: s}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-
-	// cleanup socket on exit
-	os.Remove(sockPath())
 }

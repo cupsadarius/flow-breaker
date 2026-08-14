@@ -90,9 +90,7 @@ func dataDir() string {
 	return dir
 }
 
-func dataPath() string   { return filepath.Join(dataDir(), "tasks.json") }
-func statusPath() string { return filepath.Join(dataDir(), "status.json") }
-func sockPath() string   { return filepath.Join(dataDir(), "flow.sock") }
+func dataPath() string { return filepath.Join(dataDir(), "tasks.json") }
 
 func loadStore() *Store {
 	s := &Store{}
@@ -160,6 +158,22 @@ func (s *Store) markDone(id int, source string) (Task, error) {
 		return Task{}, err
 	}
 	s.Tasks[i].Done = true
+	s.Tasks[i].Source = source
+	s.saveLocked()
+	return s.Tasks[i], nil
+}
+
+// dismissTask sets Dismissed=true, stamps Source, and persists. Returns the
+// updated task, or an error if the id is not found. Acquires the write lock
+// once. Mirrors markDone.
+func (s *Store) dismissTask(id int, source string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, err := s.findTaskByID(id)
+	if err != nil {
+		return Task{}, err
+	}
+	s.Tasks[i].Dismissed = true
 	s.Tasks[i].Source = source
 	s.saveLocked()
 	return s.Tasks[i], nil

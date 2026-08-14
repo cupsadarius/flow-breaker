@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -25,10 +26,12 @@ const (
 )
 
 type model struct {
-	store          *Store
+	store *Store // read-only display cache, refreshed from the daemon each tick
+	// report holds the latest GET /status result (alarm firing / overdue / nudge).
+	report         *StatusReport
+	offline        bool      // true when the daemon is unreachable (fail loud, use cache)
+	lastSync       time.Time // wall-clock time of the last successful daemon sync
 	cursor         int
-	alarm          *alarmState
-	fired          map[int]bool
 	width          int
 	height         int
 	msg            string
@@ -73,10 +76,30 @@ type model struct {
 }
 
 type tickMsg time.Time
-type macAlertMsg string
+
 type calEventsMsg struct {
 	events []CalendarEvent
 	err    error
+}
+
+// syncMsg carries the result of a daemon refresh (GET /tasks?scope=all + /status).
+type syncMsg struct {
+	tasks  []Task
+	report *StatusReport
+	err    error
+}
+
+// settingsMsg carries the result of GET /settings (fetched once at init).
+type settingsMsg struct {
+	settings Settings
+	err      error
+}
+
+// actionMsg carries the result of a mutation request (POST/DELETE). On success
+// it triggers an immediate resync so the cache reflects the change.
+type actionMsg struct {
+	ok  string // transient message to show on success
+	err error
 }
 
 func fetchCalEventsCmd(cacheMins int) tea.Cmd {
@@ -91,24 +114,73 @@ func fetchCalEventsCmd(cacheMins int) tea.Cmd {
 }
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
-func pollMacAlert() tea.Cmd {
+// syncCmd fetches the full task list and status report from the daemon.
+func syncCmd() tea.Cmd {
 	return func() tea.Msg {
-		select {
-		case result := <-macAlertResult:
-			return macAlertMsg(result)
-		case <-time.After(600 * time.Millisecond):
-			return nil
+		c := newClient()
+		var tasks []Task
+		if err := c.Get("/tasks?scope=all", &tasks); err != nil {
+			return syncMsg{err: err}
 		}
+		var report StatusReport
+		if err := c.Get("/status", &report); err != nil {
+			return syncMsg{err: err}
+		}
+		return syncMsg{tasks: tasks, report: &report}
+	}
+}
+
+// fetchSettingsCmd fetches settings from the daemon (source of truth).
+func fetchSettingsCmd() tea.Cmd {
+	return func() tea.Msg {
+		var s Settings
+		err := newClient().Get("/settings", &s)
+		return settingsMsg{settings: s, err: err}
+	}
+}
+
+// taskActionCmd performs a single mutation request and reports the outcome.
+func taskActionCmd(method, path string, body any, okMsg string) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		switch method {
+		case "POST":
+			err = newClient().Post(path, body, nil)
+		case "DELETE":
+			err = newClient().Delete(path, body, nil)
+		}
+		return actionMsg{ok: okMsg, err: err}
+	}
+}
+
+// importEventsCmd creates a task per selected calendar event via the daemon.
+func importEventsCmd(events []CalendarEvent) tea.Cmd {
+	return func() tea.Msg {
+		n := 0
+		for _, ev := range events {
+			body := map[string]any{
+				"time":       ev.StartTime,
+				"desc":       ev.Summary,
+				"recurrence": string(Once),
+				"tags":       []string{"gcal"},
+				"source":     "tui",
+			}
+			if err := newClient().Post("/task", body, nil); err != nil {
+				return actionMsg{err: err}
+			}
+			n++
+		}
+		return actionMsg{ok: fmt.Sprintf("Imported %d event(s)", n)}
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{tickCmd(), pollMacAlert()}
+	cmds := []tea.Cmd{tickCmd(), syncCmd(), fetchSettingsCmd()}
 	if m.store.Settings.CalEnabled {
 		m.calLoading = true
 		cmds = append(cmds, fetchCalEventsCmd(m.store.Settings.CalCacheMins))
@@ -125,14 +197,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		m.checkAlarms()
-		m.checkDailyResetForCal()
-		writeStatusFile(m.store, m.alarm)
-		return m, tea.Batch(tickCmd(), pollMacAlert())
+		return m, tea.Batch(tickCmd(), syncCmd())
 
-	case macAlertMsg:
-		m.handleMacDialogResult(string(msg))
-		return m, pollMacAlert()
+	case syncMsg:
+		m.applySync(msg)
+		return m, nil
+
+	case settingsMsg:
+		if msg.err == nil {
+			m.store.Settings = msg.settings
+		}
+		return m, nil
+
+	case actionMsg:
+		return m.handleActionResult(msg)
 
 	case calEventsMsg:
 		m.calLoading = false
@@ -164,7 +242,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputMode {
 			return m.handleInput(msg)
 		}
-		if m.alarm.active {
+		if m.report != nil && m.report.AlarmFiring {
 			return m.handleAlarmKey(msg)
 		}
 		return m.handleNormal(msg)
@@ -172,31 +250,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) handleMacDialogResult(result string) {
-	idx := m.alarm.taskIdx
-	if idx < 0 || idx >= len(m.store.Tasks) {
+// applySync folds a daemon refresh into the model. On success it replaces the
+// display cache and clears the offline flag; on any error it fails loud (sets
+// offline) while KEEPING the last-known cache — never a false empty/all-clear.
+func (m *model) applySync(msg syncMsg) {
+	if msg.err != nil {
+		m.offline = true
 		return
 	}
-	switch {
-	case strings.Contains(result, "Snooze"):
-		snz := m.store.Settings.SnoozeMins
-		m.store.Tasks[idx].Snoozed = time.Now().Add(time.Duration(snz) * time.Minute).Unix()
-		delete(m.fired, m.store.Tasks[idx].ID)
-		m.store.save()
-		m.alarm.snooze(snz)
-		m.setMsg(fmt.Sprintf("Snoozed %d min (via dialog)", snz))
-	case strings.Contains(result, "Done"):
-		m.store.Tasks[idx].Done = true
-		m.store.Tasks[idx].Dismissed = true
-		m.store.save()
-		m.alarm.dismiss()
-		m.setMsg("Marked done (via dialog)")
-	case strings.Contains(result, "Dismiss"), strings.Contains(result, "gave up"):
-		m.store.Tasks[idx].Dismissed = true
-		m.store.save()
-		m.alarm.dismiss()
-		m.setMsg("Dismissed (via dialog)")
+	m.offline = false
+	m.lastSync = time.Now()
+	m.store.Tasks = msg.tasks
+	m.report = msg.report
+}
+
+// handleActionResult processes a mutation outcome: on error, fail loud; on
+// success, show the message and immediately resync so the cache reflects it.
+func (m model) handleActionResult(msg actionMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		if errors.Is(msg.err, ErrDaemonDown) {
+			m.offline = true
+			m.setMsg("daemon down")
+		} else {
+			m.setMsg(msg.err.Error())
+		}
+		return m, nil
 	}
+	if msg.ok != "" {
+		m.setMsg(msg.ok)
+	}
+	return m, syncCmd()
 }
 
 func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -219,6 +302,10 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor = len(active) - 1
 		}
 	case "a":
+		if m.offline {
+			m.setMsg("daemon down")
+			return m, nil
+		}
 		m.inputMode = true
 		m.editingID = 0
 		m.inputField = fieldTime
@@ -229,6 +316,10 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputDays = [7]bool{}
 		m.recCursor = 1
 	case "e":
+		if m.offline {
+			m.setMsg("daemon down")
+			return m, nil
+		}
 		if m.cursor >= 0 && m.cursor < len(active) {
 			t := active[m.cursor]
 			m.inputMode = true
@@ -249,22 +340,23 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "d", "x":
+		if m.offline {
+			m.setMsg("daemon down")
+			return m, nil
+		}
 		if len(active) > 0 {
 			m.confirmDel = true
 		}
 	case "c":
+		if m.offline {
+			m.setMsg("daemon down")
+			return m, nil
+		}
 		realIdx := m.store.activeIndex(m.cursor)
 		if realIdx >= 0 {
-			t := &m.store.Tasks[realIdx]
-			t.Done = !t.Done
-			if t.Done {
-				today := time.Now().Format("2006-01-02")
-				if t.History == nil {
-					t.History = make(map[string]bool)
-				}
-				t.History[today] = true
-			}
-			m.store.save()
+			id := m.store.Tasks[realIdx].ID
+			return m, taskActionCmd("POST", fmt.Sprintf("/task/%d/done", id),
+				map[string]any{"source": "tui"}, "Marked done")
 		}
 	case "h":
 		m.habitView = !m.habitView
@@ -293,9 +385,8 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.settingsMode = true
 		m.settingsCursor = 0
 	case "r":
-		m.store = loadStore()
-		m.store.resetDaily()
-		m.setMsg("Reloaded")
+		m.setMsg("Refreshing…")
+		return m, syncCmd()
 	case "v":
 		archived := m.store.ArchivedTasks()
 		if len(archived) > 0 {
@@ -308,31 +399,25 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleAlarmKey acks the firing alarm by its task ID via the daemon. The firing
+// task comes from m.report (owned by the daemon scheduler), never local state.
 func (m model) handleAlarmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	idx := m.alarm.taskIdx
-	if idx < 0 || idx >= len(m.store.Tasks) {
-		m.alarm.dismiss()
+	if m.report == nil || !m.report.AlarmFiring || m.report.AlarmTask == nil {
 		return m, nil
 	}
+	if m.offline {
+		m.setMsg("daemon down")
+		return m, nil
+	}
+	id := m.report.AlarmTask.ID
+	body := map[string]any{"source": "tui"}
 	switch msg.String() {
 	case " ", "enter":
-		m.store.Tasks[idx].Dismissed = true
-		m.store.save()
-		m.alarm.dismiss()
-		m.setMsg("Dismissed")
+		return m, taskActionCmd("POST", fmt.Sprintf("/task/%d/dismiss", id), body, "Dismissed")
 	case "s":
-		snz := m.store.Settings.SnoozeMins
-		m.store.Tasks[idx].Snoozed = time.Now().Add(time.Duration(snz) * time.Minute).Unix()
-		delete(m.fired, m.store.Tasks[idx].ID)
-		m.store.save()
-		m.alarm.snooze(snz)
-		m.setMsg(fmt.Sprintf("Snoozed %d min", snz))
+		return m, taskActionCmd("POST", fmt.Sprintf("/task/%d/snooze", id), body, "Snoozed")
 	case "c":
-		m.store.Tasks[idx].Done = true
-		m.store.Tasks[idx].Dismissed = true
-		m.store.save()
-		m.alarm.dismiss()
-		m.setMsg("Marked done")
+		return m, taskActionCmd("POST", fmt.Sprintf("/task/%d/done", id), body, "Marked done")
 	}
 	return m, nil
 }
@@ -340,16 +425,20 @@ func (m model) handleAlarmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) handleConfirmDel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
+		m.confirmDel = false
+		if m.offline {
+			m.setMsg("daemon down")
+			return m, nil
+		}
 		realIdx := m.store.activeIndex(m.cursor)
 		if realIdx >= 0 {
-			m.store.deleteTask(m.store.Tasks[realIdx].ID)
-			active := m.store.ActiveTasks()
-			if m.cursor >= len(active) && m.cursor > 0 {
+			id := m.store.Tasks[realIdx].ID
+			if m.cursor > 0 && m.cursor >= len(m.store.ActiveTasks())-1 {
 				m.cursor--
 			}
-			m.setMsg("Deleted")
+			return m, taskActionCmd("DELETE", fmt.Sprintf("/task/%d", id),
+				map[string]any{"source": "tui"}, "Deleted")
 		}
-		m.confirmDel = false
 	default:
 		m.confirmDel = false
 	}
@@ -507,16 +596,44 @@ func (m model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			days := daysFromBools(m.inputDays)
-			if m.editingID > 0 {
-				m.store.editTask(m.editingID, m.inputTime, m.inputDesc, m.inputRec, tags, days)
-				m.inputMode = false
-				m.editingID = 0
-				m.setMsg(fmt.Sprintf("Updated: %s %s", m.inputTime, m.inputDesc))
-			} else {
-				m.store.addTask(m.inputTime, m.inputDesc, m.inputRec, tags, days)
-				m.inputMode = false
-				m.setMsg(fmt.Sprintf("Added: %s %s", m.inputTime, m.inputDesc))
+			editingID := m.editingID
+			m.inputMode = false
+			m.editingID = 0
+			if m.offline {
+				m.setMsg("daemon down")
+				return m, nil
 			}
+			if editingID > 0 {
+				// Send tags/days as explicit (non-nil) slices so a cleared field
+				// overwrites rather than being treated as "unchanged" by the edit
+				// route's pointer-omission semantics.
+				if tags == nil {
+					tags = []string{}
+				}
+				if days == nil {
+					days = []string{}
+				}
+				body := map[string]any{
+					"time":       m.inputTime,
+					"desc":       m.inputDesc,
+					"recurrence": string(m.inputRec),
+					"tags":       tags,
+					"days":       days,
+					"source":     "tui",
+				}
+				return m, taskActionCmd("POST", fmt.Sprintf("/task/%d", editingID), body,
+					fmt.Sprintf("Updated: %s %s", m.inputTime, m.inputDesc))
+			}
+			body := map[string]any{
+				"time":       m.inputTime,
+				"desc":       m.inputDesc,
+				"recurrence": string(m.inputRec),
+				"tags":       tags,
+				"days":       days,
+				"source":     "tui",
+			}
+			return m, taskActionCmd("POST", "/task", body,
+				fmt.Sprintf("Added: %s %s", m.inputTime, m.inputDesc))
 		case "n":
 			m.inputMode = false
 			m.editingID = 0
@@ -525,72 +642,9 @@ func (m model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) checkOverdueOnStartup() {
-	for i, t := range m.store.Tasks {
-		if t.Done || t.Dismissed || m.fired[t.ID] {
-			continue
-		}
-		if t.Snoozed > 0 && time.Now().Unix() < t.Snoozed {
-			continue
-		}
-		if !shouldFireToday(t) {
-			continue
-		}
-		if timeUntil(t) < 0 {
-			m.alarm.trigger(i)
-			m.fired[t.ID] = true
-			alertAll("Flow Breaker", t.Desc, &m.store.Settings)
-			break
-		}
-	}
-}
-
-func (m *model) checkAlarms() {
-	if m.alarm.active {
-		m.alarm.tick++
-		if m.alarm.tick%10 == 0 {
-			fmt.Print("\a")
-			macSound("Ping")
-		}
-		return
-	}
-	now := time.Now()
-	for i, t := range m.store.Tasks {
-		if t.Done || t.Dismissed || m.fired[t.ID] {
-			continue
-		}
-		if t.Snoozed > 0 && now.Unix() < t.Snoozed {
-			continue
-		}
-		if !shouldFireToday(t) {
-			continue
-		}
-		d := timeUntil(t)
-		if d > 0 || d < -2*time.Minute {
-			continue
-		}
-		m.alarm.trigger(i)
-		m.fired[t.ID] = true
-		alertAll("Flow Breaker", t.Desc, &m.store.Settings)
-		break
-	}
-}
-
 func (m *model) setMsg(s string) {
 	m.msg = s
 	m.msgExpiry = time.Now().Add(3 * time.Second)
-}
-
-// checkDailyResetForCal auto-shows calendar suggestions after daily reset
-func (m *model) checkDailyResetForCal() {
-	today := time.Now().Format("2006-01-02")
-	if m.store.LastReset != today {
-		m.store.resetDaily()
-		if m.store.Settings.CalEnabled && !m.calLoading {
-			m.calEvents = nil
-			m.calLoading = true
-		}
-	}
 }
 
 func (m model) handleCalSuggestions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -624,18 +678,22 @@ func (m model) handleCalSuggestions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.calSelected[i] = !allOn
 		}
 	case "enter":
+		m.calSuggestMode = false
+		m.calTimelineMode = false
+		if m.offline {
+			m.setMsg("daemon down")
+			return m, nil
+		}
+		// Skip all-day events and ones already imported (dedup via the cache).
 		var selected []CalendarEvent
 		for i, ev := range m.calEvents {
-			if m.calSelected[i] {
+			if m.calSelected[i] && !ev.AllDay && !m.isEventImported(ev) {
 				selected = append(selected, ev)
 			}
 		}
 		if len(selected) > 0 {
-			imported := m.store.importCalendarEvents(selected)
-			m.setMsg(fmt.Sprintf("Imported %d event(s)", len(imported)))
+			return m, importEventsCmd(selected)
 		}
-		m.calSuggestMode = false
-		m.calTimelineMode = false
 	case "r":
 		m.calLoading = true
 		m.calEvents = nil
@@ -786,16 +844,20 @@ func (m model) handleArchive(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.archiveCursor--
 		}
 	case "d", "x":
+		if m.offline {
+			m.setMsg("daemon down")
+			return m, nil
+		}
 		if m.archiveCursor >= 0 && m.archiveCursor < len(archived) {
-			m.store.deleteTask(archived[m.archiveCursor].ID)
-			archived = m.store.ArchivedTasks()
-			if m.archiveCursor >= len(archived) && m.archiveCursor > 0 {
+			id := archived[m.archiveCursor].ID
+			if m.archiveCursor > 0 && m.archiveCursor >= len(archived)-1 {
 				m.archiveCursor--
 			}
-			if len(archived) == 0 {
+			if len(archived) <= 1 {
 				m.archiveMode = false
 			}
-			m.setMsg("Deleted from archive")
+			return m, taskActionCmd("DELETE", fmt.Sprintf("/task/%d", id),
+				map[string]any{"source": "tui"}, "Deleted from archive")
 		}
 	}
 	return m, nil
@@ -1016,6 +1078,12 @@ var (
 
 	habitDismissStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("11"))
+
+	offlineStyle = lipgloss.NewStyle().
+			Bold(true).
+			Background(lipgloss.Color("9")).
+			Foreground(lipgloss.Color("0")).
+			Padding(0, 2)
 )
 
 const (
@@ -1049,12 +1117,19 @@ func (m model) View() string {
 	b.WriteString(clockStyle.Width(w).Align(lipgloss.Center).Render(clock))
 	b.WriteString("\n\n")
 
-	// alarm bar
-	if m.alarm.active && m.alarm.taskIdx >= 0 && m.alarm.taskIdx < len(m.store.Tasks) {
-		t := m.store.Tasks[m.alarm.taskIdx]
+	// offline banner — fail loud when the daemon is unreachable
+	if m.offline {
+		msg := fmt.Sprintf("⚠ daemon unreachable — stale as of %s", m.lastSync.Format("15:04"))
+		b.WriteString(offlineStyle.Width(w).Render(msg))
+		b.WriteString("\n\n")
+	}
+
+	// alarm bar — firing state is owned by the daemon (m.report), not local state
+	if m.report != nil && m.report.AlarmFiring && m.report.AlarmTask != nil {
+		t := *m.report.AlarmTask
 		flash := "🔔"
 		style := alarmBoxA
-		if m.alarm.tick%4 < 2 {
+		if (time.Now().UnixMilli()/500)%2 == 0 {
 			flash = "🔕"
 			style = alarmBoxB
 		}
@@ -1194,6 +1269,9 @@ func (m model) View() string {
 			}
 
 			desc := t.Desc
+			if m.offline {
+				desc += " (last known)"
+			}
 			if len(t.Tags) > 0 {
 				desc += " (" + strings.Join(t.Tags, ", ") + ")"
 			}
@@ -1290,7 +1368,6 @@ func (m model) View() string {
 		helpKeys += "  o:settings  r:reload  j/k:nav  q:quit"
 		b.WriteString(dimStyle.Render(helpKeys))
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  sock: %s  file: %s", sockPath(), statusPath())))
 	}
 
 	return lipgloss.Place(w, h, lipgloss.Left, lipgloss.Top, b.String())
@@ -1431,14 +1508,15 @@ var settingsLabels = [10]string{
 	"Cache duration (min)",
 }
 
+// handleSettings drives the read-only settings screen. Editing settings moves to
+// the daemon in Phase 6, so toggles/adjustments are disabled here; only
+// navigation, opening (local) feed management, and closing remain.
 func (m model) handleSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "esc", "o":
 		m.settingsMode = false
-		m.store.save()
-		m.setMsg("Settings saved")
 	case "j", "down":
 		if m.settingsCursor < 9 {
 			m.settingsCursor++
@@ -1456,52 +1534,16 @@ func (m model) handleSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "enter":
+		// Calendar feeds are stored in local files (not the daemon), so managing
+		// them stays available in this phase.
 		if m.settingsCursor == 8 {
 			m.feedsMode = true
 			m.feedsCursor = 0
 			m.feedsList, _ = loadFeeds()
 			m.settingsMode = false
-		} else {
-			m.toggleSettingBool()
-		}
-	case " ":
-		m.toggleSettingBool()
-	case "h", "left":
-		if m.settingsCursor == 0 && m.store.Settings.SnoozeMins > 1 {
-			m.store.Settings.SnoozeMins--
-		}
-		if m.settingsCursor == 9 && m.store.Settings.CalCacheMins > 1 {
-			m.store.Settings.CalCacheMins--
-		}
-	case "l", "right":
-		if m.settingsCursor == 0 && m.store.Settings.SnoozeMins < 60 {
-			m.store.Settings.SnoozeMins++
-		}
-		if m.settingsCursor == 9 && m.store.Settings.CalCacheMins < 120 {
-			m.store.Settings.CalCacheMins++
 		}
 	}
 	return m, nil
-}
-
-func (m *model) toggleSettingBool() {
-	s := &m.store.Settings
-	switch m.settingsCursor {
-	case 1:
-		s.AlertNotify = !s.AlertNotify
-	case 2:
-		s.AlertDialog = !s.AlertDialog
-	case 3:
-		s.AlertSpeech = !s.AlertSpeech
-	case 4:
-		s.AlertSound = !s.AlertSound
-	case 5:
-		s.AlertBell = !s.AlertBell
-	case 6:
-		s.AlertTmux = !s.AlertTmux
-	case 8:
-		s.CalEnabled = !s.CalEnabled
-	}
 }
 
 func (m model) renderSettings(w int) string {
@@ -1558,7 +1600,9 @@ func (m model) renderSettings(w int) string {
 	}
 
 	inner.WriteString("\n")
-	inner.WriteString(dimStyle.Render("  j/k:navigate  space:toggle  ◄►:adjust  esc:back"))
+	inner.WriteString(dimStyle.Render("  settings editing moves to the daemon (Phase 6)"))
+	inner.WriteString("\n")
+	inner.WriteString(dimStyle.Render("  j/k:navigate  enter:manage feeds  esc:back"))
 	inner.WriteString("\n")
 
 	boxWidth := w - 4
