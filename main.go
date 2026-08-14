@@ -44,6 +44,8 @@ func main() {
 			cliOpencodeInstall()
 		case "codex-install":
 			cliCodexInstall()
+		case "codex-guard":
+			cliCodexGuard()
 		case "help", "--help", "-h":
 			printUsage()
 		default:

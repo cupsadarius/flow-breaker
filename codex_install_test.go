@@ -84,6 +84,10 @@ func TestPatchCodexHooksMergesPreservingSupacode(t *testing.T) {
 	if n := eventLen(t, events, "UserPromptSubmit"); n != 1 {
 		t.Fatalf("UserPromptSubmit entries = %d, want 1", n)
 	}
+	// PreToolUse gets flow-breaker's clear-guard.
+	if n := eventLen(t, events, "PreToolUse"); n != 1 {
+		t.Fatalf("PreToolUse entries = %d, want 1 (clear-guard)", n)
+	}
 
 	// supacode's commands are still present.
 	raw, _ := os.ReadFile(path)
@@ -91,7 +95,7 @@ func TestPatchCodexHooksMergesPreservingSupacode(t *testing.T) {
 		t.Fatal("supacode entries were clobbered")
 	}
 
-	// flow-breaker: loud SessionStart, quiet UserPromptSubmit.
+	// flow-breaker: loud SessionStart, quiet UserPromptSubmit, clear-guard.
 	if !hookInstalled(events, "SessionStart", "flow-breaker nudge") {
 		t.Fatal("flow-breaker SessionStart nudge not appended")
 	}
@@ -100,6 +104,9 @@ func TestPatchCodexHooksMergesPreservingSupacode(t *testing.T) {
 	}
 	if !hookInstalled(events, "UserPromptSubmit", "flow-breaker nudge --quiet") {
 		t.Fatal("flow-breaker UserPromptSubmit quiet nudge not appended")
+	}
+	if !hookInstalled(events, "PreToolUse", "flow-breaker codex-guard") {
+		t.Fatal("flow-breaker PreToolUse clear-guard not appended")
 	}
 }
 
@@ -127,6 +134,9 @@ func TestPatchCodexHooksIdempotent(t *testing.T) {
 	if n := eventLen(t, events, "UserPromptSubmit"); n != 1 {
 		t.Fatalf("UserPromptSubmit entries = %d after re-run, want 1 (no dup)", n)
 	}
+	if n := eventLen(t, events, "PreToolUse"); n != 1 {
+		t.Fatalf("PreToolUse entries = %d after re-run, want 1 (no dup)", n)
+	}
 }
 
 // TestPatchCodexHooksFromScratch verifies a missing hooks.json is created with
@@ -143,14 +153,21 @@ func TestPatchCodexHooksFromScratch(t *testing.T) {
 	if !hookInstalled(events, "UserPromptSubmit", "flow-breaker nudge --quiet") {
 		t.Fatal("UserPromptSubmit quiet nudge missing")
 	}
+	if !hookInstalled(events, "PreToolUse", "flow-breaker codex-guard") {
+		t.Fatal("PreToolUse clear-guard missing")
+	}
 	// Each entry carries a generous timeout.
 	if !strings.Contains(func() string { d, _ := os.ReadFile(path); return string(d) }(), "\"timeout\"") {
 		t.Fatal("hook entries should carry a timeout")
 	}
 }
 
-// TestWriteCodexRulesFailClosed verifies all 13 ExecPolicy prefix_rules with the
-// fail-closed base (prompt) and clear (forbidden).
+// TestWriteCodexRulesFailClosed verifies the 12 ExecPolicy prefix_rules with
+// clear forbidden. There is deliberately NO base `["flow-breaker"]` rule: Codex
+// aggregates matched prefix_rules to the MOST RESTRICTIVE decision (verified via
+// `codex execpolicy check`), so a base `prompt` rule would poison every `allow`
+// down to `prompt`. Unknown subcommands simply don't match and fall through to
+// Codex's normal approval flow.
 func TestWriteCodexRulesFailClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rules", "flow-breaker.rules")
 	if err := writeCodexRules(path); err != nil {
@@ -162,12 +179,12 @@ func TestWriteCodexRulesFailClosed(t *testing.T) {
 	}
 	content := string(data)
 
-	if n := strings.Count(content, "prefix_rule("); n != 13 {
-		t.Fatalf("expected 13 prefix_rules, got %d:\n%s", n, content)
+	if n := strings.Count(content, "prefix_rule("); n != 12 {
+		t.Fatalf("expected 12 prefix_rules, got %d:\n%s", n, content)
 	}
-	// Base prefix must be prompt (fail-closed for unknown subcommands).
-	if !strings.Contains(content, `prefix_rule(pattern=["flow-breaker"], decision="prompt")`) {
-		t.Fatalf("base rule must be prompt:\n%s", content)
+	// A base `["flow-breaker"]` rule must NOT exist — it would poison allow.
+	if strings.Contains(content, `prefix_rule(pattern=["flow-breaker"],`) {
+		t.Fatalf("must NOT contain a base [\"flow-breaker\"] rule (poisons allow):\n%s", content)
 	}
 	// clear must be forbidden.
 	if !strings.Contains(content, `prefix_rule(pattern=["flow-breaker", "clear"], decision="forbidden")`) {
@@ -281,5 +298,66 @@ func TestPatchCodexAgentsMDMigratesOldSection(t *testing.T) {
 	again, _ := os.ReadFile(path)
 	if string(again) != content {
 		t.Fatal("second run changed the file (not idempotent)")
+	}
+}
+
+// guardOut runs codexGuard against a synthetic PreToolUse event and returns the
+// stdout it produced.
+func guardOut(t *testing.T, event string) string {
+	t.Helper()
+	var buf strings.Builder
+	codexGuard(strings.NewReader(event), &buf)
+	return buf.String()
+}
+
+// TestCodexGuardDeniesClear verifies the guard emits a deny decision (with a
+// non-empty reason, which Codex requires) for a `flow-breaker clear` tool call,
+// across the argv-array, shell-string, and path-prefixed shapes.
+func TestCodexGuardDeniesClear(t *testing.T) {
+	cases := map[string]string{
+		"argv array":   `{"hook_event_name":"PreToolUse","tool_name":"shell","tool_input":{"command":["flow-breaker","clear"]}}`,
+		"shell string": `{"hook_event_name":"PreToolUse","tool_input":{"command":["bash","-lc","flow-breaker clear && echo done"]}}`,
+		"path prefix":  `{"tool_input":{"command":["/opt/homebrew/bin/flow-breaker clear"]}}`,
+	}
+	for name, ev := range cases {
+		t.Run(name, func(t *testing.T) {
+			out := guardOut(t, ev)
+			if !strings.Contains(out, `"permissionDecision":"deny"`) {
+				t.Fatalf("expected a deny decision, got: %q", out)
+			}
+			var parsed map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+				t.Fatalf("guard output is not valid JSON: %v (%q)", err, out)
+			}
+			hso, _ := parsed["hookSpecificOutput"].(map[string]interface{})
+			if hso["hookEventName"] != "PreToolUse" {
+				t.Fatalf("hookEventName should be PreToolUse; got %v", hso["hookEventName"])
+			}
+			if r, _ := hso["permissionDecisionReason"].(string); strings.TrimSpace(r) == "" {
+				t.Fatal("deny MUST carry a non-empty permissionDecisionReason (Codex rejects an empty one)")
+			}
+		})
+	}
+}
+
+// TestCodexGuardPassesThrough verifies the guard stays SILENT (empty stdout,
+// letting normal flow proceed) for non-clear commands, near-misses like
+// `clear-cache`, unrelated commands, and unparseable input.
+func TestCodexGuardPassesThrough(t *testing.T) {
+	cases := map[string]string{
+		"nudge":           `{"tool_input":{"command":["flow-breaker","nudge"]}}`,
+		"clear substring": `{"tool_input":{"command":["flow-breaker","clear-cache"]}}`,
+		"unrelated rm":    `{"tool_input":{"command":["rm","-rf","./build"]}}`,
+		"other clear":     `{"tool_input":{"command":["git","clear"]}}`,
+		"empty stdin":     ``,
+		"not json":        `not json at all`,
+		"no tool_input":   `{"hook_event_name":"PreToolUse"}`,
+	}
+	for name, ev := range cases {
+		t.Run(name, func(t *testing.T) {
+			if out := guardOut(t, ev); out != "" {
+				t.Fatalf("expected passthrough (empty output), got: %q", out)
+			}
+		})
 	}
 }

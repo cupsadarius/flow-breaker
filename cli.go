@@ -1140,21 +1140,23 @@ func cliCodexInstall() {
 		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", rulesPath, err)
 		os.Exit(1)
 	}
-	fmt.Println("✓ wrote fail-closed ExecPolicy rules to ~/.codex/rules/flow-breaker.rules (base prompt · reads+capture+add allow · done/snooze prompt · clear forbidden)")
+	fmt.Println("✓ wrote ExecPolicy rules to ~/.codex/rules/flow-breaker.rules (reads+capture+add allow · done/snooze prompt · clear forbidden)")
 	patchCodexAgentsMD(agentsMDPath)
 
 	// config.toml is NEVER auto-edited — enabling hooks is the user's call.
 	fmt.Println()
-	fmt.Println("⚠️  Manual step — enable hooks in ~/.codex/config.toml:")
+	fmt.Println("⚠️  Manual step — enable hooks in ~/.codex/config.toml (required for BOTH the")
+	fmt.Println("    nudges AND the clear-guard):")
 	fmt.Println("      [features]")
 	fmt.Println("      hooks = true")
 	fmt.Println()
-	// Trust caveat: ExecPolicy may be bypassed in a trusted project.
-	fmt.Println("⚠️  Trust caveat: in a project running at trust_level=\"trusted\", Codex may")
-	fmt.Println("    bypass ExecPolicy prefix_rules. Verify the fail-closed rules actually apply:")
-	fmt.Println("      echo | flow-breaker clear   # must be BLOCKED (forbidden)")
-	fmt.Println("    If it is NOT blocked under trust, the fallback is a PreToolUse hook")
-	fmt.Println("    returning allow/deny/ask — not installed here; wire it only if needed.")
+	// Trust note: ExecPolicy `forbidden` can be bypassed in a trusted project, so
+	// the destructive `clear` block is ALSO enforced by the PreToolUse guard hook
+	// (trust-independent). Point the user at the verification.
+	fmt.Println("ℹ️  `flow-breaker clear` is blocked two ways: the ExecPolicy `forbidden` rule")
+	fmt.Println("    AND a PreToolUse `flow-breaker codex-guard` hook that hard-denies it even")
+	fmt.Println("    when the project is trust_level=\"trusted\" (where ExecPolicy may be bypassed).")
+	fmt.Println("    Verify (with hooks enabled) that the agent cannot run `flow-breaker clear`.")
 }
 
 // appendCodexHook appends a command-hook entry to events[event], preserving all
@@ -1215,6 +1217,16 @@ func patchCodexHooks(path string) error {
 		fmt.Println("✓ appended UserPromptSubmit hook to ~/.codex/hooks.json")
 	}
 
+	// PreToolUse guard: hard-denies `flow-breaker clear` regardless of ExecPolicy
+	// trust bypass. Its stdout carries the deny decision, so it is NOT redirected.
+	if hookInstalled(events, "PreToolUse", "flow-breaker codex-guard") {
+		fmt.Println("✓ PreToolUse clear-guard hook already configured")
+	} else {
+		appendCodexHook(events, "PreToolUse", "flow-breaker codex-guard", 5)
+		changed = true
+		fmt.Println("✓ appended PreToolUse clear-guard hook to ~/.codex/hooks.json")
+	}
+
 	if !changed {
 		return nil
 	}
@@ -1228,12 +1240,23 @@ func patchCodexHooks(path string) error {
 }
 
 // codexRulesContent is the full ExecPolicy rules file. It is OURS (a dedicated
-// file, not the shared default.rules), so it is written whole. Fail-closed: the
-// bare "flow-breaker" prefix is `prompt` (an unknown/new subcommand prompts,
-// since most-specific prefix wins), reads + capture + add `allow`, done/snooze
-// `prompt`, and clear `forbidden`.
-const codexRulesContent = `prefix_rule(pattern=["flow-breaker"], decision="prompt")
-prefix_rule(pattern=["flow-breaker", "nudge"], decision="allow")
+// file; Codex's load_exec_policy globs every ~/.codex/rules/*.rules, so this is
+// picked up automatically), so it is written whole.
+//
+// RESOLUTION MODEL (verified against codex 0.147.0 `execpolicy check`): when
+// several prefix_rules match one command, the aggregate decision is the MOST
+// RESTRICTIVE of them (forbidden > prompt > allow) — NOT most-specific. So there
+// is deliberately NO base `prefix_rule(["flow-breaker"], "prompt")`: it would
+// match every subcommand and, being more restrictive than `allow`, would poison
+// the read/capture/add rules down to `prompt`. Instead each real subcommand is
+// listed explicitly; an unknown/new subcommand simply doesn't match here and
+// falls through to Codex's normal approval flow.
+//
+// Fail-closed for the destructive path: clear is `forbidden`. Because ExecPolicy
+// can be bypassed in a trusted project (trust_level="trusted"), the clear block
+// is ALSO enforced by the PreToolUse `codex-guard` hook, which is trust-
+// independent — this rules file is defense-in-depth + read ergonomics.
+const codexRulesContent = `prefix_rule(pattern=["flow-breaker", "nudge"], decision="allow")
 prefix_rule(pattern=["flow-breaker", "status"], decision="allow")
 prefix_rule(pattern=["flow-breaker", "list"], decision="allow")
 prefix_rule(pattern=["flow-breaker", "ls"], decision="allow")
@@ -1255,6 +1278,89 @@ func writeCodexRules(path string) error {
 		return err
 	}
 	return os.WriteFile(path, []byte(codexRulesContent), 0644)
+}
+
+// codexClearRe matches an invocation of `flow-breaker clear` inside a command
+// string or argv, tolerating an absolute/relative path prefix on the binary and
+// requiring `clear` to be the immediate next token (so `clear-cache` and a bare
+// substring like `myflow-breaker` do NOT match). Command names are
+// case-sensitive, so the match is too.
+var codexClearRe = regexp.MustCompile("(?:^|[\\s;&|(`\"'])(?:[\\w./-]*/)?flow-breaker[ \t\n]+clear(?:$|[\\s;&|)`\"'])")
+
+// collectStrings recursively appends every string leaf in v to *acc. It flattens
+// a tool_input of any shape — an argv array (["flow-breaker","clear"]), a shell
+// string ("flow-breaker clear && …"), or a nested {command:[…]} object — so the
+// guard can scan the whole payload without hard-coding Codex's tool schema.
+func collectStrings(v interface{}, acc *[]string) {
+	switch t := v.(type) {
+	case string:
+		*acc = append(*acc, t)
+	case []interface{}:
+		for _, e := range t {
+			collectStrings(e, acc)
+		}
+	case map[string]interface{}:
+		for _, e := range t {
+			collectStrings(e, acc)
+		}
+	}
+}
+
+// codexGuardReason is the deny message surfaced to the model/user when clear is
+// blocked. Codex requires a non-empty permissionDecisionReason on a deny.
+const codexGuardReason = "flow-breaker clear deletes ALL tasks and is blocked by the flow-breaker guard. If you truly intend to wipe every task, run it yourself in a terminal."
+
+// codexGuard reads a Codex PreToolUse event from r and, ONLY when the tool call
+// invokes `flow-breaker clear`, writes a PreToolUse `deny` decision to w. Every
+// other command is passthrough (no output) so ExecPolicy + normal approval flow
+// unchanged. This makes the clear block REAL even when the project is
+// trust_level="trusted" and ExecPolicy `forbidden` is bypassed — the PreToolUse
+// hook fires regardless of trust.
+//
+// It fails PASSTHROUGH (never blocks) on any read/parse failure: the guard only
+// ever denies a positively-identified clear, and ExecPolicy remains the gate for
+// everything else. Blocking on parse failure would break every tool call.
+//
+// The decision uses Codex's Claude-compatible hookSpecificOutput wire
+// (permissionDecision:"deny" + permissionDecisionReason), verified against the
+// embedded hook schema in codex 0.147.0. permissionDecision:"allow"/"ask" are
+// deliberately NOT emitted (unsupported from a PreToolUse hook in this build);
+// passthrough is an empty stdout + exit 0.
+func codexGuard(r io.Reader, w io.Writer) {
+	data, err := io.ReadAll(io.LimitReader(r, 1<<20))
+	if err != nil {
+		return
+	}
+	var event map[string]interface{}
+	if json.Unmarshal(data, &event) != nil {
+		return
+	}
+	toolInput := event["tool_input"]
+	if toolInput == nil {
+		toolInput = event["toolInput"] // tolerate camelCase, just in case
+	}
+	var strs []string
+	collectStrings(toolInput, &strs)
+	if !codexClearRe.MatchString(strings.Join(strs, "\n")) {
+		return // passthrough
+	}
+	out := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": codexGuardReason,
+		},
+	}
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(out)
+}
+
+// cliCodexGuard is the `flow-breaker codex-guard` entry point — the PreToolUse
+// hook target. It never exits non-zero (a guard crash must not wedge Codex); a
+// block is expressed purely via the deny JSON on stdout.
+func cliCodexGuard() {
+	codexGuard(os.Stdin, os.Stdout)
 }
 
 // codexAgentsMDBlock is the marker-wrapped flow-breaker section for Codex's
