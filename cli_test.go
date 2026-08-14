@@ -169,3 +169,119 @@ func TestClearWithClientContinuesPast404(t *testing.T) {
 		t.Fatalf("expected 1 and 3 deleted, got %v", deleted)
 	}
 }
+
+// nudgeTextServer serves a fixed body at GET /nudge (and /nudge?quiet=1).
+func nudgeTextServer(body string) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /nudge", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(body))
+	})
+	return httptest.NewServer(mux)
+}
+
+// TestNudgeLoudUnreachable: loud nudge against a down daemon prints the HONEST
+// unreachable line (never a false all-clear) and does not error.
+func TestNudgeLoudUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close() // nothing listening now
+	c := &Client{BaseURL: url, http: &http.Client{}}
+
+	var buf bytes.Buffer
+	if err := nudgeWithClient(c, false, &buf); err != nil {
+		t.Fatalf("nudgeWithClient loud unreachable err = %v, want nil", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "unreachable") || !strings.Contains(out, "tasks unknown") {
+		t.Fatalf("loud unreachable output = %q, want the honest unreachable line", out)
+	}
+	if strings.Contains(out, "All clear") {
+		t.Fatalf("loud unreachable must NEVER print a false all-clear, got %q", out)
+	}
+}
+
+// TestNudgeLoudSuccess: loud nudge prints the daemon's body verbatim.
+func TestNudgeLoudSuccess(t *testing.T) {
+	srv := nudgeTextServer("⚠️ OVERDUE: dishes (09:00)")
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	if err := nudgeWithClient(testClient(srv), false, &buf); err != nil {
+		t.Fatalf("nudgeWithClient loud success err = %v", err)
+	}
+	if !strings.Contains(buf.String(), "OVERDUE: dishes") {
+		t.Fatalf("loud success output = %q, want the body", buf.String())
+	}
+}
+
+// TestNudgeQuietSilentOnUnreachable: quiet nudge says NOTHING when the daemon is
+// down (fail-open) and does not error.
+func TestNudgeQuietSilentOnUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	c := &Client{BaseURL: url, http: &http.Client{}}
+
+	var buf bytes.Buffer
+	if err := nudgeWithClient(c, true, &buf); err != nil {
+		t.Fatalf("nudgeWithClient quiet unreachable err = %v, want nil", err)
+	}
+	if buf.String() != "" {
+		t.Fatalf("quiet unreachable must be silent, printed %q", buf.String())
+	}
+}
+
+// TestNudgeQuietSilentOnEmpty: quiet nudge prints nothing when the daemon gates
+// to an empty body.
+func TestNudgeQuietSilentOnEmpty(t *testing.T) {
+	srv := nudgeTextServer("")
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	if err := nudgeWithClient(testClient(srv), true, &buf); err != nil {
+		t.Fatalf("nudgeWithClient quiet empty err = %v", err)
+	}
+	if buf.String() != "" {
+		t.Fatalf("quiet empty must be silent, printed %q", buf.String())
+	}
+}
+
+// TestNudgeQuietPrintsNonEmpty: quiet nudge prints a non-empty gated nudge.
+func TestNudgeQuietPrintsNonEmpty(t *testing.T) {
+	srv := nudgeTextServer("🚨 ALARM: 09:00 — standup (do it NOW)")
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	if err := nudgeWithClient(testClient(srv), true, &buf); err != nil {
+		t.Fatalf("nudgeWithClient quiet nonempty err = %v", err)
+	}
+	if !strings.Contains(buf.String(), "ALARM") {
+		t.Fatalf("quiet nonempty output = %q, want the nudge", buf.String())
+	}
+}
+
+// TestCliSource covers the source-attribution precedence.
+func TestCliSource(t *testing.T) {
+	t.Run("explicit env wins", func(t *testing.T) {
+		t.Setenv("FLOW_BREAKER_SOURCE", "phone")
+		t.Setenv("CLAUDECODE", "1")
+		if got := cliSource(); got != "phone" {
+			t.Fatalf("cliSource = %q, want phone", got)
+		}
+	})
+	t.Run("claude code detected", func(t *testing.T) {
+		t.Setenv("FLOW_BREAKER_SOURCE", "")
+		t.Setenv("CLAUDECODE", "1")
+		if got := cliSource(); got != "claude-code" {
+			t.Fatalf("cliSource = %q, want claude-code", got)
+		}
+	})
+	t.Run("plain cli fallback", func(t *testing.T) {
+		t.Setenv("FLOW_BREAKER_SOURCE", "")
+		t.Setenv("CLAUDECODE", "")
+		if got := cliSource(); got != "cli" {
+			t.Fatalf("cliSource = %q, want cli", got)
+		}
+	})
+}

@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // newTestStore returns a fresh store whose saves land in a temp dir so tests
@@ -590,5 +592,102 @@ func TestConcurrentAddAndStatus(t *testing.T) {
 
 	if got := len(store.ActiveTasks()); got != n {
 		t.Fatalf("got %d tasks, want %d", got, n)
+	}
+}
+
+// getText performs a plain GET and returns the trimmed body string.
+func getText(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.DefaultClient.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", url, resp.StatusCode)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	return string(data)
+}
+
+// hhmm formats now+offset as HH:MM for building tasks relative to the clock.
+func hhmm(offset time.Duration) string {
+	return time.Now().Add(offset).Format("15:04")
+}
+
+// TestNudgeRouteLoud: GET /nudge (no quiet) always returns the nudge text, even
+// when the daemon's honest answer is the all-clear.
+func TestNudgeRouteLoud(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	body := getText(t, srv.URL+"/nudge")
+	if strings.TrimSpace(body) == "" {
+		t.Fatal("loud /nudge returned empty body, want the all-clear nudge")
+	}
+	if !strings.Contains(body, "All clear") {
+		t.Fatalf("loud /nudge = %q, want the daemon's all-clear line", body)
+	}
+}
+
+// TestNudgeQuietAllClearEmpty: with no interrupt-worthy state, ?quiet=1 returns
+// an empty body (the Pi gates).
+func TestNudgeQuietAllClearEmpty(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	if body := getText(t, srv.URL+"/nudge?quiet=1"); body != "" {
+		t.Fatalf("quiet all-clear /nudge = %q, want empty", body)
+	}
+}
+
+// TestNudgeQuietOverdue: an overdue task makes ?quiet=1 non-empty.
+func TestNudgeQuietOverdue(t *testing.T) {
+	store := newTestStore(t)
+	store.addTaskSource(hhmm(-2*time.Minute), "", "overdue task", Daily, nil, nil, "tui")
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	body := getText(t, srv.URL+"/nudge?quiet=1")
+	if strings.TrimSpace(body) == "" {
+		t.Fatal("quiet /nudge with an overdue task returned empty, want the nudge")
+	}
+	if !strings.Contains(body, "OVERDUE") {
+		t.Fatalf("quiet overdue /nudge = %q, want an OVERDUE nudge", body)
+	}
+}
+
+// TestNudgeQuietNextSoon: a task due in ~5 minutes (under the 10-min gate, but
+// not overdue) makes ?quiet=1 non-empty.
+func TestNudgeQuietNextSoon(t *testing.T) {
+	store := newTestStore(t)
+	store.addTaskSource(hhmm(5*time.Minute), "", "soon task", Daily, nil, nil, "tui")
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	if body := getText(t, srv.URL+"/nudge?quiet=1"); strings.TrimSpace(body) == "" {
+		t.Fatal("quiet /nudge with a task due in 5min returned empty, want the nudge")
+	}
+}
+
+// TestInterruptWorthyAlarm guards the alarm arm of the gate directly (a firing
+// alarm is hard to synthesize over HTTP without the scheduler).
+func TestInterruptWorthyAlarm(t *testing.T) {
+	if !interruptWorthy(StatusReport{AlarmFiring: true}) {
+		t.Fatal("AlarmFiring report should be interrupt-worthy")
+	}
+	if interruptWorthy(StatusReport{}) {
+		t.Fatal("empty report should not be interrupt-worthy")
+	}
+	if !interruptWorthy(StatusReport{Overdue: []TaskStatus{{}}}) {
+		t.Fatal("overdue report should be interrupt-worthy")
+	}
+	if !interruptWorthy(StatusReport{Next: &TaskStatus{Seconds: 300}}) {
+		t.Fatal("next-in-5min report should be interrupt-worthy")
+	}
+	if interruptWorthy(StatusReport{Next: &TaskStatus{Seconds: 3600}}) {
+		t.Fatal("next-in-1h report should NOT be interrupt-worthy")
 	}
 }

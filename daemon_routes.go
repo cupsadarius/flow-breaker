@@ -263,37 +263,65 @@ func handleTasks(store *Store) http.HandlerFunc {
 	}
 }
 
-// handleStatus handles GET /status. The scheduler tracks the firing task by
-// stable ID; here it is resolved to its current slice index and the report is
-// built under ONE read lock, so a concurrent write (add/edit/delete →
-// sortTasks) cannot move the task between resolving the index and reading it.
+// buildReport resolves the scheduler's firing task (tracked by stable ID) to its
+// current slice index and builds the StatusReport under ONE read lock, so a
+// concurrent write (add/edit/delete → sortTasks) cannot move the task between
+// resolving the index and reading it. If the firing task no longer exists (e.g.
+// deleted), the stale scheduler state is cleared after the lock is released
+// (clearFiring takes the scheduler lock only, not the store lock).
+func buildReport(store *Store, sc *scheduler) StatusReport {
+	id := sc.firing()
+
+	store.mu.RLock()
+	var alarm *alarmState
+	if id != 0 {
+		idx := -1
+		for i := range store.Tasks {
+			if store.Tasks[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			alarm = &alarmState{active: true, taskIdx: idx}
+		}
+	}
+	report := buildStatusLocked(store, alarm)
+	store.mu.RUnlock()
+
+	if id != 0 && alarm == nil {
+		sc.clearFiring(id)
+	}
+	return report
+}
+
+// handleStatus handles GET /status.
 func handleStatus(store *Store, sc *scheduler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := sc.firing()
+		writeJSON(w, http.StatusOK, buildReport(store, sc))
+	}
+}
 
-		store.mu.RLock()
-		var alarm *alarmState
-		if id != 0 {
-			idx := -1
-			for i := range store.Tasks {
-				if store.Tasks[i].ID == id {
-					idx = i
-					break
-				}
-			}
-			if idx >= 0 {
-				alarm = &alarmState{active: true, taskIdx: idx}
-			}
-		}
-		report := buildStatusLocked(store, alarm)
-		store.mu.RUnlock()
+// interruptWorthy reports whether a nudge is worth breaking into the turn for:
+// an alarm is firing, a task is overdue, or the next task is under 10 minutes
+// out. The Pi (daemon) owns this gate so every client — Claude Code, opencode,
+// Codex — inherits the same quiet policy without reimplementing it.
+func interruptWorthy(r StatusReport) bool {
+	return r.AlarmFiring || len(r.Overdue) > 0 || (r.Next != nil && r.Next.Seconds < 600)
+}
 
-		// Firing task no longer exists (e.g. deleted): clear the stale state.
-		// Done after releasing the read lock — clearFiring takes the scheduler
-		// lock only, not the store lock.
-		if id != 0 && alarm == nil {
-			sc.clearFiring(id)
+// handleNudge handles GET /nudge — the plain-text nudge line for agents. Loud
+// (default) always returns buildStatus(...).Nudge. With ?quiet=1 the daemon
+// gates: an EMPTY body (still 200) unless the state is interruptWorthy, in which
+// case the Nudge string is returned. The client never has to decide when to
+// speak; it just prints whatever the daemon hands back.
+func handleNudge(store *Store, sc *scheduler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		report := buildReport(store, sc)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if r.URL.Query().Get("quiet") == "1" && !interruptWorthy(report) {
+			return // gated: empty body, 200
 		}
-		writeJSON(w, http.StatusOK, report)
+		w.Write([]byte(report.Nudge))
 	}
 }

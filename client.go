@@ -44,10 +44,15 @@ type Client struct {
 }
 
 // newClient builds a Client pointed at the resolved daemon URL with a 2s timeout.
-func newClient() *Client {
+func newClient() *Client { return newClientTimeout(2 * time.Second) }
+
+// newClientTimeout builds a Client pointed at the resolved daemon URL with a
+// caller-chosen timeout. The quiet/loud nudge path uses a short (800ms) timeout
+// so a slow or down daemon can never block the agent's turn.
+func newClientTimeout(d time.Duration) *Client {
 	return &Client{
 		BaseURL: daemonURL(),
-		http:    &http.Client{Timeout: 2 * time.Second},
+		http:    &http.Client{Timeout: d},
 	}
 }
 
@@ -101,6 +106,30 @@ func (c *Client) do(method, path string, body, out any) error {
 
 // Get performs a GET and decodes the JSON response into out (nil out ignores it).
 func (c *Client) Get(path string, out any) error { return c.do(http.MethodGet, path, nil, out) }
+
+// GetText performs a GET and returns the raw response body as a string, for the
+// plain-text /nudge endpoint. Transport failures (dial refused, reset, timeout)
+// map to ErrDaemonDown; a non-2xx status returns the body text as an error.
+func (c *Client) GetText(path string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrDaemonDown, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(data))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return "", errors.New(msg)
+	}
+	return string(data), nil
+}
 
 // Post performs a POST with a JSON body and decodes the response into out.
 func (c *Client) Post(path string, body, out any) error {

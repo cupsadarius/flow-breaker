@@ -25,7 +25,7 @@ func main() {
 		case "daemon":
 			runDaemon()
 		case "nudge":
-			cliNudge()
+			cliNudge(os.Args[2:])
 		case "cal-add":
 			cliCalAdd(os.Args[2:])
 		case "cal-remove":

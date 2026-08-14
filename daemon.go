@@ -39,6 +39,7 @@ func newDaemonMux(store *Store, sc *scheduler) *http.ServeMux {
 	// Read routes.
 	mux.HandleFunc("GET /tasks", handleTasks(store))
 	mux.HandleFunc("GET /status", handleStatus(store, sc))
+	mux.HandleFunc("GET /nudge", handleNudge(store, sc))
 	mux.HandleFunc("GET /settings", handleGetSettings(store))
 
 	return mux

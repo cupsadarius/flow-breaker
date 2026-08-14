@@ -82,7 +82,7 @@ func cliAdd(args []string) {
 		"desc":       desc,
 		"recurrence": string(rec),
 		"tags":       tags,
-		"source":     "cli",
+		"source":     cliSource(),
 	}
 	var resp taskResp
 	if err := newClient().Post("/task", body, &resp); err != nil {
@@ -148,7 +148,7 @@ func cliArchive() {
 // doneByID marks the task done via the daemon and prints the result.
 func doneByID(c *Client, id int) error {
 	var resp taskResp
-	if err := c.Post(fmt.Sprintf("/task/%d/done", id), map[string]any{"source": "cli"}, &resp); err != nil {
+	if err := c.Post(fmt.Sprintf("/task/%d/done", id), map[string]any{"source": cliSource()}, &resp); err != nil {
 		return err
 	}
 	fmt.Printf("✓ done: %s %s\n", resp.Task.Time, resp.Task.Desc)
@@ -208,7 +208,7 @@ func clearWithClient(c *Client) (int, error) {
 	}
 	n := 0
 	for _, t := range tasks {
-		err := c.Delete(fmt.Sprintf("/task/%d", t.ID), map[string]any{"source": "cli"}, nil)
+		err := c.Delete(fmt.Sprintf("/task/%d", t.ID), map[string]any{"source": cliSource()}, nil)
 		if err != nil {
 			if errors.Is(err, ErrDaemonDown) {
 				return n, err
@@ -230,17 +230,62 @@ func cliStatus() {
 	fmt.Println(string(data))
 }
 
-func cliNudge() {
-	var report StatusReport
-	if err := newClient().Get("/status", &report); err != nil {
-		if errors.Is(err, ErrDaemonDown) {
-			fmt.Println("⚠️ flow-breaker unreachable")
-			return
+// cliNudge is the `flow-breaker nudge [--quiet]` entry point. It uses an 800ms
+// client so a slow/down daemon can never block the agent's turn, and always
+// exits 0 (the loud path prints an honest unreachable line; the quiet path stays
+// silent). --quiet is the shared primitive the opencode/Codex integrations use.
+func cliNudge(args []string) {
+	quiet := false
+	for _, a := range args {
+		if a == "--quiet" {
+			quiet = true
 		}
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
 	}
-	fmt.Println(report.Nudge)
+	nudgeWithClient(newClientTimeout(800*time.Millisecond), quiet, os.Stdout)
+}
+
+// nudgeWithClient GETs the daemon's nudge text over c and writes it to out.
+//
+// Loud (quiet=false): on ANY failure (ErrDaemonDown/timeout/other) it prints an
+// HONEST "unreachable" line — never a false "✅ All clear" — and returns nil
+// (exit 0). On success it prints the body, which may honestly be the daemon's
+// own all-clear (that's fine: the daemon is reachable).
+//
+// Quiet (quiet=true): silent on unreachable/timeout/empty body (fail-open, exit
+// 0); prints only a non-empty gated nudge. It never blocks the turn.
+func nudgeWithClient(c *Client, quiet bool, out io.Writer) error {
+	path := "/nudge"
+	if quiet {
+		path = "/nudge?quiet=1"
+	}
+	body, err := c.GetText(path)
+	if err != nil {
+		if quiet {
+			return nil // fail-open: say nothing
+		}
+		// Loud: honest unreachable, never a false all-clear.
+		fmt.Fprintln(out, "⚠️ flow-breaker unreachable — tasks unknown")
+		return nil
+	}
+	body = strings.TrimRight(body, "\n")
+	if strings.TrimSpace(body) == "" {
+		return nil // nothing to say (quiet all-clear, or an empty loud body)
+	}
+	fmt.Fprintln(out, body)
+	return nil
+}
+
+// cliSource resolves the source attribution stamped on CLI mutations. An
+// explicit FLOW_BREAKER_SOURCE wins; otherwise Claude Code (which sets CLAUDECODE)
+// is detected as "claude-code"; else it is a plain "cli" invocation.
+func cliSource() string {
+	if s := os.Getenv("FLOW_BREAKER_SOURCE"); s != "" {
+		return s
+	}
+	if os.Getenv("CLAUDECODE") != "" {
+		return "claude-code"
+	}
+	return "cli"
 }
 
 // cliCalAdd is the thin os.Exit wrapper over calAdd. A usage error exits 1 with
@@ -435,64 +480,53 @@ func patchSettings(path string) {
 
 	changed := false
 
-	// ── SessionStart hook ──
+	// ── Hooks ──
+	// SessionStart: one loud nudge at the top of the session.
+	// UserPromptSubmit: a gated, silent quiet nudge every turn (the 800ms
+	// fail-open lives inside `flow-breaker nudge`, so a down daemon never blocks).
 	hooks, ok := settings["hooks"].(map[string]interface{})
 	if !ok {
 		hooks = make(map[string]interface{})
 		settings["hooks"] = hooks
 	}
 
-	sessionStart, ok := hooks["SessionStart"].([]interface{})
-	if !ok {
-		sessionStart = []interface{}{}
-	}
-
-	hookExists := false
-	for _, entry := range sessionStart {
-		entryMap, ok := entry.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		hooksList, ok := entryMap["hooks"].([]interface{})
-		if !ok {
-			continue
-		}
-		for _, h := range hooksList {
-			hMap, ok := h.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			cmd, _ := hMap["command"].(string)
-			if strings.Contains(cmd, "flow-breaker nudge") {
-				hookExists = true
-				break
-			}
-		}
-		if hookExists {
-			break
-		}
-	}
-
-	if hookExists {
+	if hookInstalled(hooks, "SessionStart", "flow-breaker nudge") {
 		fmt.Println("✓ SessionStart hook already configured")
 	} else {
-		newEntry := map[string]interface{}{
-			"matcher": "startup|resume",
-			"hooks": []interface{}{
-				map[string]interface{}{
-					"type":    "command",
-					"command": "flow-breaker nudge 2>/dev/null || true",
-				},
-			},
-		}
-		sessionStart = append(sessionStart, newEntry)
-		hooks["SessionStart"] = sessionStart
+		appendHook(hooks, "SessionStart", "startup|resume", "flow-breaker nudge 2>/dev/null || true")
 		changed = true
 		fmt.Println("✓ added SessionStart hook to ~/.claude/settings.json")
 	}
 
-	// ── Bash permission for flow-breaker nudge ──
-	const nudgePerm = "Bash(flow-breaker nudge*)"
+	if hookInstalled(hooks, "UserPromptSubmit", "flow-breaker nudge --quiet") {
+		fmt.Println("✓ UserPromptSubmit hook already configured")
+	} else {
+		appendHook(hooks, "UserPromptSubmit", "", "flow-breaker nudge --quiet 2>/dev/null || true")
+		changed = true
+		fmt.Println("✓ added UserPromptSubmit hook to ~/.claude/settings.json")
+	}
+
+	// ── Granular, fail-closed Bash permissions ──
+	// Claude Code precedence is deny > ask > allow, and there is NO wildcard, so
+	// any subcommand not listed here (or a future one) falls through to the
+	// default prompt rather than being silently auto-allowed.
+	allowPerms := []string{
+		"Bash(flow-breaker nudge:*)",
+		"Bash(flow-breaker status:*)",
+		"Bash(flow-breaker next:*)",
+		"Bash(flow-breaker overdue:*)",
+		"Bash(flow-breaker alarm:*)",
+		"Bash(flow-breaker calendar:*)",
+		"Bash(flow-breaker capture:*)",
+		"Bash(flow-breaker add:*)",
+	}
+	askPerms := []string{
+		"Bash(flow-breaker done:*)",
+		"Bash(flow-breaker snooze:*)",
+	}
+	denyPerms := []string{
+		"Bash(flow-breaker clear:*)",
+	}
 
 	perms, ok := settings["permissions"].(map[string]interface{})
 	if !ok {
@@ -500,26 +534,23 @@ func patchSettings(path string) {
 		settings["permissions"] = perms
 	}
 
-	allowList, ok := perms["allow"].([]interface{})
-	if !ok {
-		allowList = []interface{}{}
-	}
-
-	permExists := false
-	for _, entry := range allowList {
-		if s, ok := entry.(string); ok && s == nudgePerm {
-			permExists = true
-			break
-		}
-	}
-
-	if permExists {
-		fmt.Println("✓ Bash permission already configured")
-	} else {
-		allowList = append(allowList, nudgePerm)
-		perms["allow"] = allowList
+	if mergePermList(perms, "allow", allowPerms) {
 		changed = true
-		fmt.Println("✓ added Bash permission for flow-breaker nudge")
+		fmt.Println("✓ merged allow permissions (reads + capture + add)")
+	} else {
+		fmt.Println("✓ allow permissions already configured")
+	}
+	if mergePermList(perms, "ask", askPerms) {
+		changed = true
+		fmt.Println("✓ merged ask permissions (done, snooze)")
+	} else {
+		fmt.Println("✓ ask permissions already configured")
+	}
+	if mergePermList(perms, "deny", denyPerms) {
+		changed = true
+		fmt.Println("✓ merged deny permissions (clear)")
+	} else {
+		fmt.Println("✓ deny permissions already configured")
 	}
 
 	// ── Write back if anything changed ──
@@ -538,6 +569,76 @@ func patchSettings(path string) {
 		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", path, err)
 		os.Exit(1)
 	}
+}
+
+// hookInstalled reports whether any command hook under the given event already
+// contains marker, so re-running the install doesn't duplicate it.
+func hookInstalled(hooks map[string]interface{}, event, marker string) bool {
+	entries, ok := hooks[event].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, entry := range entries {
+		em, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		list, ok := em["hooks"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, h := range list {
+			hm, ok := h.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// appendHook appends a command hook entry to the given event array, preserving
+// any existing entries (the user's other hooks are never clobbered). An empty
+// matcher is omitted (UserPromptSubmit takes no matcher).
+func appendHook(hooks map[string]interface{}, event, matcher, command string) {
+	entries, _ := hooks[event].([]interface{})
+	entry := map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": command},
+		},
+	}
+	if matcher != "" {
+		entry["matcher"] = matcher
+	}
+	hooks[event] = append(entries, entry)
+}
+
+// mergePermList merges adds into perms[key] (a string list) idempotently,
+// returning whether anything was added. Existing entries — including the user's
+// unrelated ones — are preserved.
+func mergePermList(perms map[string]interface{}, key string, adds []string) bool {
+	list, _ := perms[key].([]interface{})
+	have := map[string]bool{}
+	for _, e := range list {
+		if s, ok := e.(string); ok {
+			have[s] = true
+		}
+	}
+	changed := false
+	for _, a := range adds {
+		if !have[a] {
+			list = append(list, a)
+			have[a] = true
+			changed = true
+		}
+	}
+	if changed {
+		perms[key] = list
+	}
+	return changed
 }
 
 func patchClaudeMD(path string) {
@@ -559,9 +660,9 @@ func patchClaudeMD(path string) {
 
 	section := `## flow-breaker
 
-At the start of every conversation, run ` + "`flow-breaker nudge`" + ` and surface any alerts or overdue tasks to the user before proceeding. If there are overdue tasks, mention them prominently.
+A SessionStart hook runs ` + "`flow-breaker nudge`" + ` once (loud) at the start of each session. A UserPromptSubmit hook runs ` + "`flow-breaker nudge --quiet`" + ` on every turn: the daemon gates it, so it stays silent unless something is interrupt-worthy (an alarm firing, a task overdue, or the next task due within ~10 minutes). It fails open on an 800ms timeout, so a missing or slow daemon never blocks the turn.
 
-During long sessions, run ` + "`flow-breaker nudge`" + ` every 30 minutes to check for new overdue tasks. If the user asks you to monitor tasks, use ` + "`/loop 30m flow-breaker nudge`" + ` to automate this.
+When a nudge surfaces: **SURFACE it and continue — never act on it.** Mention the alert prominently to the user, then carry on with exactly what they asked. An overdue task must not make you abandon the user's work; the user decides what to do about it.
 `
 
 	// Ensure proper newline separation
