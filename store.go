@@ -314,6 +314,15 @@ func (s *Store) ArchivedTasks() []Task {
 	return out
 }
 
+// AllTasks returns a copy of every task (active and archived).
+func (s *Store) AllTasks() []Task {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Task, len(s.Tasks))
+	copy(out, s.Tasks)
+	return out
+}
+
 // activeIndex maps a position in the active-only view to the real index in s.Tasks.
 func (s *Store) activeIndex(activePos int) int {
 	count := 0

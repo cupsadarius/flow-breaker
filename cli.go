@@ -2,16 +2,34 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // ── CLI Commands ───────────────────────────────────────────────────────────
+
+// cliFail renders a client error and exits. ErrDaemonDown gets a friendly hint
+// so users understand a running daemon is now required for CLI operations.
+func cliFail(err error) {
+	if errors.Is(err, ErrDaemonDown) {
+		fmt.Fprintln(os.Stderr, "⚠️ flow-breaker unreachable (is the daemon running? `flow-breaker daemon`)")
+	} else {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	}
+	os.Exit(1)
+}
+
+// taskResp is the {ok, task} envelope returned by mutation endpoints.
+type taskResp struct {
+	OK   bool `json:"ok"`
+	Task Task `json:"task"`
+}
 
 func cliAdd(args []string) {
 	if len(args) < 2 {
@@ -48,16 +66,26 @@ func cliAdd(args []string) {
 		}
 	}
 	desc := strings.Join(descParts, " ")
-	s := loadStore()
-	s.resetDaily()
-	t := s.addTask(timeStr, desc, rec, tags, nil)
+	body := map[string]any{
+		"time":       timeStr,
+		"desc":       desc,
+		"recurrence": string(rec),
+		"tags":       tags,
+		"source":     "cli",
+	}
+	var resp taskResp
+	if err := newClient().Post("/task", body, &resp); err != nil {
+		cliFail(err)
+	}
+	t := resp.Task
 	fmt.Printf("✓ added [%d] %s %s (%s)\n", t.ID, t.Time, t.Desc, t.Recurrence)
 }
 
 func cliList() {
-	s := loadStore()
-	s.resetDaily()
-	active := s.ActiveTasks()
+	var active []Task
+	if err := newClient().Get("/tasks", &active); err != nil {
+		cliFail(err)
+	}
 	if len(active) == 0 {
 		fmt.Println("No tasks.")
 		return
@@ -76,8 +104,10 @@ func cliList() {
 }
 
 func cliArchive() {
-	s := loadStore()
-	archived := s.ArchivedTasks()
+	var archived []Task
+	if err := newClient().Get("/tasks?scope=archived", &archived); err != nil {
+		cliFail(err)
+	}
 	if len(archived) == 0 {
 		fmt.Println("No archived tasks.")
 		return
@@ -104,21 +134,37 @@ func cliArchive() {
 	}
 }
 
+// doneByID marks the task done via the daemon and prints the result.
+func doneByID(c *Client, id int) {
+	var resp taskResp
+	if err := c.Post(fmt.Sprintf("/task/%d/done", id), map[string]any{"source": "cli"}, &resp); err != nil {
+		cliFail(err)
+	}
+	fmt.Printf("✓ done: %s %s\n", resp.Task.Time, resp.Task.Desc)
+}
+
 func cliDone(args []string) {
 	if len(args) < 1 {
-		fmt.Println("usage: flow-breaker done <HH:MM or description substring>")
+		fmt.Println("usage: flow-breaker done <id | HH:MM | description substring>")
 		os.Exit(1)
 	}
-	q := strings.ToLower(strings.Join(args, " "))
-	s := loadStore()
-	for i, t := range s.Tasks {
-		if t.Archived {
-			continue
+	c := newClient()
+	// A single integer arg is treated as a task ID (v2 ID-preference).
+	if len(args) == 1 {
+		if id, err := strconv.Atoi(args[0]); err == nil {
+			doneByID(c, id)
+			return
 		}
+	}
+	// Otherwise resolve a substring / HH:MM match client-side, matching v1.
+	q := strings.ToLower(strings.Join(args, " "))
+	var tasks []Task
+	if err := c.Get("/tasks", &tasks); err != nil {
+		cliFail(err)
+	}
+	for _, t := range tasks {
 		if strings.ToLower(t.Time) == q || strings.Contains(strings.ToLower(t.Desc), q) {
-			s.Tasks[i].Done = true
-			s.save()
-			fmt.Printf("✓ done: %s %s\n", t.Time, t.Desc)
+			doneByID(c, t.ID)
 			return
 		}
 	}
@@ -126,45 +172,40 @@ func cliDone(args []string) {
 }
 
 func cliClear() {
-	s := Store{NextID: 1}
-	s.save()
-	fmt.Println("✓ all tasks cleared")
+	c := newClient()
+	var tasks []Task
+	if err := c.Get("/tasks", &tasks); err != nil {
+		cliFail(err)
+	}
+	n := 0
+	for _, t := range tasks {
+		if err := c.Delete(fmt.Sprintf("/task/%d", t.ID), map[string]any{"source": "cli"}, nil); err != nil {
+			cliFail(err)
+		}
+		n++
+	}
+	fmt.Printf("✓ cleared %d task(s)\n", n)
 }
 
 func cliStatus() {
-	s := loadStore()
-	s.resetDaily()
-	report := buildStatus(s, &alarmState{})
+	var report StatusReport
+	if err := newClient().Get("/status", &report); err != nil {
+		cliFail(err)
+	}
 	data, _ := json.MarshalIndent(report, "", "  ")
 	fmt.Println(string(data))
 }
 
 func cliNudge() {
-	// try socket first (gets live alarm state from running TUI)
-	conn, err := net.DialTimeout("unix", sockPath(), 2*time.Second)
-	if err == nil {
-		defer conn.Close()
-		conn.Write([]byte("nudge"))
-		conn.SetDeadline(time.Now().Add(2 * time.Second))
-		buf := make([]byte, 4096)
-		n, err := conn.Read(buf)
-		if err == nil {
-			fmt.Print(string(buf[:n]))
+	var report StatusReport
+	if err := newClient().Get("/status", &report); err != nil {
+		if errors.Is(err, ErrDaemonDown) {
+			fmt.Println("⚠️ flow-breaker unreachable")
 			return
 		}
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
-	// fallback: read status file
-	data, err := os.ReadFile(statusPath())
-	if err != nil {
-		// no TUI running, build from tasks file
-		s := loadStore()
-		s.resetDaily()
-		report := buildStatus(s, &alarmState{})
-		fmt.Println(report.Nudge)
-		return
-	}
-	var report StatusReport
-	json.Unmarshal(data, &report)
 	fmt.Println(report.Nudge)
 }
 
@@ -686,12 +727,17 @@ SETUP:
   flow-breaker opencode-install  install opencode plugin + instructions
 
 INTEGRATION:
-  Socket:  ~/.flow-breaker/flow.sock  (send: status|nudge|next|overdue|alarm|calendar)
-  File:    ~/.flow-breaker/status.json (updated every 500ms while TUI runs)
+  The CLI talks to the daemon over HTTP/JSON. Start it with:
+    flow-breaker daemon            # serves 127.0.0.1:7777 (loopback)
+
+  Base URL resolution (highest priority first):
+    FLOW_BREAKER_URL env var
+    ~/.config/flow-breaker/client  (file with a URL)
+    http://localhost:7777          (default)
 
   # from Claude Code / any script:
-  echo "nudge" | nc -U ~/.flow-breaker/flow.sock
-  cat ~/.flow-breaker/status.json | jq .nudge
+  curl -s http://localhost:7777/status | jq .nudge
+  curl -s http://localhost:7777/tasks
   flow-breaker nudge
 
 ADD EXAMPLES:

@@ -311,6 +311,44 @@ func TestTasksRouteEmpty(t *testing.T) {
 	}
 }
 
+func TestTasksRouteScope(t *testing.T) {
+	store := newTestStore(t)
+	store.addTaskSource("09:00", "active", Daily, nil, nil, "tui")
+	arch := store.addTaskSource("10:00", "archived", Once, nil, nil, "tui")
+	// Mark the second task archived directly.
+	store.mu.Lock()
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == arch.ID {
+			store.Tasks[i].Archived = true
+			store.Tasks[i].ArchivedAt = "2026-01-01T00:00:00Z"
+		}
+	}
+	store.mu.Unlock()
+
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	get := func(q string) []map[string]any {
+		resp := doJSON(t, "GET", srv.URL+"/tasks"+q, nil)
+		defer resp.Body.Close()
+		var tasks []map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+			t.Fatalf("decode %q: %v", q, err)
+		}
+		return tasks
+	}
+
+	if got := get(""); len(got) != 1 || got[0]["desc"] != "active" {
+		t.Fatalf("default scope = %+v, want [active]", got)
+	}
+	if got := get("?scope=archived"); len(got) != 1 || got[0]["desc"] != "archived" {
+		t.Fatalf("scope=archived = %+v, want [archived]", got)
+	}
+	if got := get("?scope=all"); len(got) != 2 {
+		t.Fatalf("scope=all len = %d, want 2", len(got))
+	}
+}
+
 func TestStatusRoute(t *testing.T) {
 	store := newTestStore(t)
 	store.addTaskSource("09:00", "a", Daily, nil, nil, "tui")

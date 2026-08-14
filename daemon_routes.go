@@ -151,10 +151,20 @@ func handleDelete(store *Store) http.HandlerFunc {
 	}
 }
 
-// handleTasks handles GET /tasks — the active (non-archived) tasks as an array.
+// handleTasks handles GET /tasks. The optional ?scope= query selects which
+// tasks to return: "archived" → archived only, "all" → every task, anything
+// else (including empty) → active (non-archived) only.
 func handleTasks(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tasks := store.ActiveTasks()
+		var tasks []Task
+		switch r.URL.Query().Get("scope") {
+		case "archived":
+			tasks = store.ArchivedTasks()
+		case "all":
+			tasks = store.AllTasks()
+		default:
+			tasks = store.ActiveTasks()
+		}
 		if tasks == nil {
 			tasks = []Task{}
 		}
