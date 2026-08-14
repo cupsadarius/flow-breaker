@@ -18,9 +18,10 @@ POST https://<machine>.<tailnet>.ts.net/capture
 {"text": "wash the dishes in 16 min", "source": "phone"}   # source optional, defaults "api"
 
 200 (always — inbox is a valid outcome)
-{ "echo": "14:12 — wash the dishes",
+{ "echo": "14:12 — wash the dishes",             # scheduled: "[tomorrow |YYYY-MM-DD ]HH:MM — <desc>"
+                                                 # inbox:     "📥 inbox — <desc>"
   "destination": "scheduled" | "inbox",
-  "parsedBy": "heuristic" | "haiku",
+  "parsedBy": "heuristics" | "haiku" | "none",   # "none" = inbox floor (no confident time)
   "task": { "id": 42, ... } }
 ```
 
@@ -34,7 +35,7 @@ App: **HTTP Shortcuts** (F-Droid or Play, open source).
 
 - [ ] Create shortcut → **POST** to `https://<machine>.<tailnet>.ts.net/capture`.
 - [ ] Add a **text-input variable** `input` (prompt on launch).
-- [ ] Body (JSON): `{"text": "{{input}}", "source": "phone"}`  <!-- HTTP Shortcuts var syntax is {{name}}; the doc's `$$$input` was shorthand — confirm the exact token in-app -->
+- [ ] Body (JSON): `{"text": "{{input}}", "source": "phone"}` — HTTP Shortcuts references variables as `{{name}}`; insert `input` from the variable picker so the real token is embedded, not the literal text.
 - [ ] Header `Content-Type: application/json`.
 - [ ] Response handling → **show response as toast**, template = the `echo` field → free echo-back.
 - [ ] On the input dialog, tap the **mic key (Gboard dictation)** to speak.
@@ -55,8 +56,12 @@ _Deferred: hands-free (Tasker + AutoVoice). Don't start there — tap-and-speak 
 
 - [ ] Install **ntfy**; add server `https://<machine>.<tailnet>.ts.net`, subscribe topic **`flow`**.
 - [ ] **Exempt ntfy from battery optimization** + enable **instant delivery**. Self-hosted ntfy holds its own connection (not FCM) — if Android kills it, alerts stop with no error anywhere.
-- [ ] Priority mapping (set by the publisher, verify on device): **5** = real alarm (bypass DND, vibrate, repeat sound); **3** = 10-min heads-up.
-- [ ] Action buttons deliver on the notification (built server-side, T9): **Done** → `POST /task/{id}/done`, **Snooze** → `POST /task/{id}/snooze`. Tapping the notification *is* the state change — confirm both buttons hit the daemon and mutate.
+- [ ] Priority mapping (the daemon's escalation ladder sets `X-Priority`; verify each level on-device). One task's ladder steps up over elapsed time since first fire:
+  - **3** = initial fire (0:00), republished every 60s while unacked;
+  - **4** = escalated at ≥3:00;
+  - **5** = real alarm at ≥6:00 — configure the ntfy app so **5 bypasses DND, vibrates, and repeats the sound**;
+  - at ≥10:00 the daemon *also* fires a one-shot **Telegram** (the alerts-out rung, already built — see Fail-loud); at ≥15:00 the ladder auto-snoozes +30m (then Missed on a second miss).
+- [ ] Action buttons ride on every escalation notification (already built server-side: `escalationActions`, gated on the daemon's `FLOW_BREAKER_PUBLIC_URL`): **Done** → `POST /task/{id}/done`, **Snooze** → `POST /task/{id}/snooze`. Tapping a button *is* the state change — confirm both hit the daemon and mutate `/status`.
 - [ ] `flow-triage` topic is later (mute triage without muting alarms) — not part of this pass.
 
 ## 4. Mac — notify (`ntfy subscribe --exec`)
@@ -81,7 +86,7 @@ the AppleScript literal, so an alarm body containing quotes can't break out.
 The six v1 alert types survive the move to push: notification, speech, and sound
 are reproduced here; the dialog (`display alert` with Snooze/Done/Dismiss) and the
 terminal bell / tmux flash remain in the local TUI, which is now a viewer alongside
-the push path (Android/Telegram carry the actionable Done/Snooze buttons).
+the push path (the ntfy push on Android carries the actionable Done/Snooze buttons; the 10-min Telegram rung is a plain-text nudge, no buttons).
 
 ### Daemonize via launchd
 
@@ -100,7 +105,7 @@ so it runs at login and restarts on crash:
 T7 makes off-tailnet delivery the **client's** job via a fallback ladder:
 
 1. **Pi `/capture`** (tailnet up) — the happy path above.
-2. **Telegram** — _blocked_: needs daemon-side Telegram *ingest* (poll bot → feed `/capture`). T4 spec'd Telegram for alerts-**out** only; capture-**in** via Telegram is not yet built or decided. Track before wiring tier 2.
+2. **Telegram (capture-in)** — _blocked_: needs daemon-side Telegram *ingest* (poll bot → feed `/capture`), which is not yet built or decided. Don't confuse directions: alerts-**out** via Telegram (the ladder's 10-min rung) **is** built and firing; only capture-**in** via Telegram is missing. Track before wiring tier 2.
 3. **Local note** — always-works floor: append raw text to Apple Notes / Keep so nothing is lost. This is the tier every client MUST have today.
 
 Until tier 2 exists, clients go **Pi → local note** (skip Telegram).
@@ -109,6 +114,6 @@ Until tier 2 exists, clients go **Pi → local note** (skip Telegram).
 
 - [ ] Speak a timed capture on the phone → toast echoes the parse → task appears in `/status`.
 - [ ] Speak a timeless capture → echo says `inbox` → item lands in `inbox[]`.
-- [ ] Fire a test alarm → phone buzzes at priority 5, bypasses DND → tap **Done** → task marked done in `/status`.
+- [ ] Fire a test alarm → phone buzzes. The live ladder only reaches **priority 5** at ≥6 min; to check DND bypass now, publish a p5 straight to the topic: `curl -H "X-Priority: 5" -d "test alarm" https://<machine>.<tailnet>.ts.net/flow`. Confirm it bypasses DND → tap **Done** on a real escalation → task marked done in `/status`.
 - [ ] Mac: same alarm speaks via `say`.
 - [ ] Turn Tailscale **off** on the phone → capture → red toast + text saved to local note (nothing lost).
