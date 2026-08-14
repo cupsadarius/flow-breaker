@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +12,16 @@ import (
 	"strings"
 	"time"
 )
+
+// calSecretURLHint teaches the user where to find their private iCal URL. It is
+// printed on `cal-add --help`, on a bare `cal-add` with no URL, and once in the
+// success output after a feed is added.
+const calSecretURLHint = "Google Calendar → Settings → (select the calendar) → **Integrate calendar** → **Secret address in iCal format**. Treat the URL like a password — anyone holding it can read the calendar."
+
+// errCalAddUsage signals a cal-add usage error (no URL). The hint + usage are
+// already written to the output writer, so the wrapper just needs a non-zero
+// exit without printing a redundant "error:" line.
+var errCalAddUsage = errors.New("cal-add: missing url argument")
 
 // ── CLI Commands ───────────────────────────────────────────────────────────
 
@@ -232,11 +243,33 @@ func cliNudge() {
 	fmt.Println(report.Nudge)
 }
 
+// cliCalAdd is the thin os.Exit wrapper over calAdd. A usage error exits 1 with
+// no extra output (the hint + usage were already printed); any other error is
+// rendered as an "error:" line before exiting 1.
 func cliCalAdd(args []string) {
-	if len(args) < 1 {
-		fmt.Println("usage: flow-breaker cal-add <url-or-path> [--label \"Work\"]")
+	if err := calAdd(args, os.Stdout); err != nil {
+		if !errors.Is(err, errCalAddUsage) {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		}
 		os.Exit(1)
 	}
+}
+
+// calAdd runs the cal-add logic, writing all user-facing output to out and
+// returning an error instead of calling os.Exit (so it is testable). It prints
+// the secret-URL hint in three cases: --help, a bare invocation (no URL), and
+// once after a successful add.
+func calAdd(args []string, out io.Writer) error {
+	// Help and the no-URL usage error both print usage + the secret-URL hint.
+	if len(args) < 1 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintln(out, "usage: flow-breaker cal-add <url-or-path> [--label \"Work\"]")
+		fmt.Fprintln(out, calSecretURLHint)
+		if len(args) >= 1 { // --help / -h is an intentional, successful invocation
+			return nil
+		}
+		return errCalAddUsage
+	}
+
 	url := args[0]
 	isFile := !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://")
 
@@ -252,19 +285,16 @@ func cliCalAdd(args []string) {
 		// Resolve to absolute path for reliable storage
 		abs, err := filepath.Abs(strings.TrimPrefix(url, "file://"))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		// Validate file exists and contains iCal data
-		fmt.Println("Validating file...")
+		fmt.Fprintln(out, "Validating file...")
 		data, err := os.ReadFile(abs)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		if !strings.Contains(string(data), "BEGIN:VCALENDAR") {
-			fmt.Fprintf(os.Stderr, "error: file does not appear to be a valid iCal file\n")
-			os.Exit(1)
+			return errors.New("file does not appear to be a valid iCal file")
 		}
 		url = abs
 		if label == "" {
@@ -272,15 +302,13 @@ func cliCalAdd(args []string) {
 		}
 	} else {
 		// HTTP validation
-		fmt.Println("Validating feed...")
+		fmt.Fprintln(out, "Validating feed...")
 		ical, err := fetchICalFeed(url)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		if !strings.Contains(ical, "BEGIN:VCALENDAR") {
-			fmt.Fprintf(os.Stderr, "error: URL does not appear to be a valid iCal feed\n")
-			os.Exit(1)
+			return errors.New("URL does not appear to be a valid iCal feed")
 		}
 		if label == "" {
 			label = url
@@ -288,8 +316,7 @@ func cliCalAdd(args []string) {
 	}
 
 	if err := addFeed(url, label); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	// enable calendar if not already
@@ -299,7 +326,9 @@ func cliCalAdd(args []string) {
 		s.save()
 	}
 
-	fmt.Printf("✓ Feed added: %s\n✓ Calendar enabled\n\nNext steps:\n  flow-breaker cal-list    see today's events\n  Launch TUI → press 'p'   import events as tasks\n", label)
+	fmt.Fprintf(out, "✓ Feed added: %s\n✓ Calendar enabled\n\nNext steps:\n  flow-breaker cal-list    see today's events\n  Launch TUI → press 'p'   import events as tasks\n", label)
+	fmt.Fprintln(out, calSecretURLHint)
+	return nil
 }
 
 func cliCalRemove(args []string) {

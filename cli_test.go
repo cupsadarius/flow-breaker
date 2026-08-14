@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -97,6 +100,37 @@ func TestClearWithClientDeletesAllInclArchived(t *testing.T) {
 	}
 	if got := store.AllTasks(); len(got) != 0 {
 		t.Fatalf("store still has %d tasks, want 0: %+v", len(got), got)
+	}
+}
+
+// TestCalAddNoArgsPrintsHintAndFails guards Task 2: a bare `cal-add` prints the
+// secret-URL hint and returns a usage error (mapped to a non-zero exit).
+func TestCalAddNoArgsPrintsHintAndFails(t *testing.T) {
+	var buf bytes.Buffer
+	err := calAdd(nil, &buf)
+	if !errors.Is(err, errCalAddUsage) {
+		t.Fatalf("calAdd(nil) err = %v, want errCalAddUsage", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Secret address in iCal format") {
+		t.Fatalf("bare cal-add did not print the secret-URL hint:\n%s", out)
+	}
+	if !strings.Contains(out, "like a password") {
+		t.Fatalf("bare cal-add hint missing the password warning:\n%s", out)
+	}
+}
+
+// TestCalAddHelpPrintsHint guards Task 2: `cal-add --help` prints the hint and
+// is a successful (nil-error) invocation.
+func TestCalAddHelpPrintsHint(t *testing.T) {
+	for _, flag := range []string{"--help", "-h"} {
+		var buf bytes.Buffer
+		if err := calAdd([]string{flag}, &buf); err != nil {
+			t.Fatalf("calAdd(%q) err = %v, want nil", flag, err)
+		}
+		if !strings.Contains(buf.String(), "Secret address in iCal format") {
+			t.Fatalf("cal-add %s did not print the secret-URL hint:\n%s", flag, buf.String())
+		}
 	}
 }
 
