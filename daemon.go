@@ -28,6 +28,7 @@ func newDaemonMux(store *Store, sc *scheduler) *http.ServeMux {
 
 	// Mutation routes (each persists the source field).
 	mux.HandleFunc("POST /task", handleAddTask(store))
+	mux.HandleFunc("POST /capture", handleCapture(store))
 	mux.HandleFunc("POST /task/{id}/done", handleDone(store))
 	mux.HandleFunc("POST /task/{id}/snooze", handleSnooze(store))
 	mux.HandleFunc("POST /task/{id}/dismiss", handleDismiss(store))

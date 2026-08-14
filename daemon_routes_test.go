@@ -100,7 +100,7 @@ func TestAddTaskRouteExplicitSource(t *testing.T) {
 
 func TestDoneRoute(t *testing.T) {
 	store := newTestStore(t)
-	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")
+	seed := store.addTaskSource("09:00", "", "task", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -153,7 +153,7 @@ func TestDoneRouteBadID(t *testing.T) {
 
 func TestDismissRoute(t *testing.T) {
 	store := newTestStore(t)
-	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "cli")
+	seed := store.addTaskSource("09:00", "", "task", Daily, nil, nil, "cli")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -219,7 +219,7 @@ func TestGetSettingsRoute(t *testing.T) {
 
 func TestSnoozeRoute(t *testing.T) {
 	store := newTestStore(t)
-	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")
+	seed := store.addTaskSource("09:00", "", "task", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -243,7 +243,7 @@ func TestSnoozeRoute(t *testing.T) {
 
 func TestSnoozeRouteExplicitMinutes(t *testing.T) {
 	store := newTestStore(t)
-	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")
+	seed := store.addTaskSource("09:00", "", "task", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -255,7 +255,7 @@ func TestSnoozeRouteExplicitMinutes(t *testing.T) {
 
 func TestEditRoute(t *testing.T) {
 	store := newTestStore(t)
-	seed := store.addTaskSource("09:00", "old", Daily, nil, nil, "tui")
+	seed := store.addTaskSource("09:00", "", "old", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -285,7 +285,7 @@ func TestEditRoute(t *testing.T) {
 
 func TestDeleteRoute(t *testing.T) {
 	store := newTestStore(t)
-	seed := store.addTaskSource("09:00", "task", Daily, nil, nil, "tui")
+	seed := store.addTaskSource("09:00", "", "task", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -319,7 +319,7 @@ func TestDeleteRouteNotFound(t *testing.T) {
 
 func TestEditRouteEmptyRecurrenceUnchanged(t *testing.T) {
 	store := newTestStore(t)
-	seed := store.addTaskSource("09:00", "old", Daily, nil, nil, "tui")
+	seed := store.addTaskSource("09:00", "", "old", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -342,8 +342,8 @@ func TestEditRouteEmptyRecurrenceUnchanged(t *testing.T) {
 
 func TestTasksRoute(t *testing.T) {
 	store := newTestStore(t)
-	store.addTaskSource("09:00", "a", Daily, nil, nil, "tui")
-	store.addTaskSource("10:00", "b", Daily, nil, nil, "tui")
+	store.addTaskSource("09:00", "", "a", Daily, nil, nil, "tui")
+	store.addTaskSource("10:00", "", "b", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -379,8 +379,8 @@ func TestTasksRouteEmpty(t *testing.T) {
 
 func TestTasksRouteScope(t *testing.T) {
 	store := newTestStore(t)
-	store.addTaskSource("09:00", "active", Daily, nil, nil, "tui")
-	arch := store.addTaskSource("10:00", "archived", Once, nil, nil, "tui")
+	store.addTaskSource("09:00", "", "active", Daily, nil, nil, "tui")
+	arch := store.addTaskSource("10:00", "", "archived", Once, nil, nil, "tui")
 	// Mark the second task archived directly.
 	store.mu.Lock()
 	for i := range store.Tasks {
@@ -417,7 +417,7 @@ func TestTasksRouteScope(t *testing.T) {
 
 func TestStatusRoute(t *testing.T) {
 	store := newTestStore(t)
-	store.addTaskSource("09:00", "a", Daily, nil, nil, "tui")
+	store.addTaskSource("09:00", "", "a", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -449,6 +449,118 @@ func TestStatusRoute(t *testing.T) {
 	}
 	if _, ok := m["nudge"]; !ok {
 		t.Fatalf("missing nudge key")
+	}
+}
+
+// TestCaptureTimed guards Task 3/4: a text with an unambiguous relative time is
+// scheduled by heuristics and lands in store.Tasks.
+func TestCaptureTimed(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", srv.URL+"/capture", map[string]any{
+		"text":   "wash dishes in 16 min",
+		"source": "phone",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	m := decodeMap(t, resp)
+	if m["destination"] != "scheduled" {
+		t.Fatalf("destination = %v, want scheduled", m["destination"])
+	}
+	if m["parsedBy"] != "heuristics" {
+		t.Fatalf("parsedBy = %v, want heuristics", m["parsedBy"])
+	}
+	task, ok := m["task"].(map[string]any)
+	if !ok {
+		t.Fatalf("task missing/wrong type: %v", m["task"])
+	}
+	if task["source"] != "phone" {
+		t.Fatalf("task.source = %v, want phone", task["source"])
+	}
+	if got := store.ActiveTasks(); len(got) != 1 {
+		t.Fatalf("store.Tasks len = %d, want 1", len(got))
+	}
+	if len(store.Inbox) != 0 {
+		t.Fatalf("inbox len = %d, want 0", len(store.Inbox))
+	}
+}
+
+// TestCaptureTimeless guards Task 3/4: a text with no time signal floors to the
+// inbox with parsedBy "none" and the default "api" source.
+func TestCaptureTimeless(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", srv.URL+"/capture", map[string]any{
+		"text": "call the plumber",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	m := decodeMap(t, resp)
+	if m["destination"] != "inbox" {
+		t.Fatalf("destination = %v, want inbox", m["destination"])
+	}
+	if m["parsedBy"] != "none" {
+		t.Fatalf("parsedBy = %v, want none", m["parsedBy"])
+	}
+	task, ok := m["task"].(map[string]any)
+	if !ok {
+		t.Fatalf("task missing/wrong type: %v", m["task"])
+	}
+	if task["source"] != "api" {
+		t.Fatalf("task.source = %v, want api (default)", task["source"])
+	}
+	if len(store.Inbox) != 1 || store.Inbox[0].Desc != "call the plumber" {
+		t.Fatalf("inbox not populated: %+v", store.Inbox)
+	}
+	if got := store.ActiveTasks(); len(got) != 0 {
+		t.Fatalf("store.Tasks len = %d, want 0", len(got))
+	}
+}
+
+// TestCaptureHaikuFloor guards Task 4: a signal-but-unparseable input with no
+// ANTHROPIC_API_KEY errors immediately in parseHaiku and floors to the inbox —
+// still captured (200), never dropped, no network call.
+func TestCaptureHaikuFloor(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", srv.URL+"/capture", map[string]any{
+		"text": "do the thing at some point",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (captured)", resp.StatusCode)
+	}
+	m := decodeMap(t, resp)
+	if m["destination"] != "inbox" {
+		t.Fatalf("destination = %v, want inbox (floored)", m["destination"])
+	}
+	if len(store.Inbox) != 1 {
+		t.Fatalf("inbox len = %d, want 1", len(store.Inbox))
+	}
+}
+
+// TestCaptureMalformedBody guards Task 4: a malformed JSON body is the only 4xx
+// — the parser/Haiku never errors the request.
+func TestCaptureMalformedBody(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/capture", "application/json", bytes.NewReader([]byte("{not json")))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 }
 

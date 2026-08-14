@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // writeJSON marshals v and writes it with the given status code.
@@ -55,9 +57,66 @@ func handleAddTask(store *Store) http.HandlerFunc {
 		if rec == "" {
 			rec = Once
 		}
-		t := store.addTaskSource(body.Time, body.Desc, rec, body.Tags, body.Days, defaultSource(body.Source))
+		t := store.addTaskSource(body.Time, "", body.Desc, rec, body.Tags, body.Days, defaultSource(body.Source))
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "task": t})
 	}
+}
+
+// handleCapture handles POST /capture — free-text capture with the inbox floor.
+// It parses the text (heuristics → Haiku → inbox), scheduling a task when a time
+// is confidently resolved and otherwise floating the raw capture to the inbox.
+// A 200 means captured, nothing else; only a malformed JSON body is a 4xx.
+func handleCapture(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Text   string `json:"text"`
+			Source string `json:"source"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		source := defaultSource(body.Source)
+		res, dest, parsedBy := DefaultParse(body.Text, time.Now())
+
+		var task any
+		var echo string
+		if dest == "scheduled" {
+			t := store.addTaskSource(res.Time, res.Date, res.Desc, res.Recurrence, nil, res.Days, source)
+			task = t
+			echo = captureEcho(res)
+		} else {
+			desc := res.Desc
+			if desc == "" {
+				desc = strings.TrimSpace(body.Text)
+			}
+			task = store.addInbox(desc, source)
+			echo = "📥 inbox — " + desc
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"echo":        echo,
+			"destination": dest,
+			"parsedBy":    parsedBy,
+			"task":        task,
+		})
+	}
+}
+
+// captureEcho renders a human-readable one-line summary of a scheduled capture.
+// The date prefix is omitted when the task fires today, shown as "tomorrow" for
+// the next day, and as the bare YYYY-MM-DD otherwise.
+func captureEcho(res ParseResult) string {
+	now := time.Now()
+	prefix := ""
+	switch res.Date {
+	case "", now.Format("2006-01-02"):
+		// today — no date prefix
+	case now.AddDate(0, 0, 1).Format("2006-01-02"):
+		prefix = "tomorrow "
+	default:
+		prefix = res.Date + " "
+	}
+	return prefix + res.Time + " — " + res.Desc
 }
 
 // handleDone handles POST /task/{id}/done.

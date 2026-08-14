@@ -17,8 +17,8 @@ func testClient(srv *httptest.Server) *Client {
 
 func TestDoneWithClientIntegerID(t *testing.T) {
 	store := newTestStore(t)
-	a := store.addTaskSource("09:00", "standup", Daily, nil, nil, "tui")
-	store.addTaskSource("10:00", "lunch", Daily, nil, nil, "tui")
+	a := store.addTaskSource("09:00", "", "standup", Daily, nil, nil, "tui")
+	store.addTaskSource("10:00", "", "lunch", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -37,8 +37,8 @@ func TestDoneWithClientIntegerID(t *testing.T) {
 
 func TestDoneWithClientSubstring(t *testing.T) {
 	store := newTestStore(t)
-	store.addTaskSource("09:00", "standup", Daily, nil, nil, "tui")
-	lunch := store.addTaskSource("10:00", "lunch break", Daily, nil, nil, "tui")
+	store.addTaskSource("09:00", "", "standup", Daily, nil, nil, "tui")
+	lunch := store.addTaskSource("10:00", "", "lunch break", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -57,7 +57,7 @@ func TestDoneWithClientSubstring(t *testing.T) {
 
 func TestDoneWithClientSubstringMiss(t *testing.T) {
 	store := newTestStore(t)
-	store.addTaskSource("09:00", "standup", Daily, nil, nil, "tui")
+	store.addTaskSource("09:00", "", "standup", Daily, nil, nil, "tui")
 	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
 	defer srv.Close()
 
@@ -74,8 +74,8 @@ func TestDoneWithClientSubstringMiss(t *testing.T) {
 
 func TestClearWithClientDeletesAllInclArchived(t *testing.T) {
 	store := newTestStore(t)
-	store.addTaskSource("09:00", "active", Daily, nil, nil, "tui")
-	arch := store.addTaskSource("10:00", "archived", Once, nil, nil, "tui")
+	store.addTaskSource("09:00", "", "active", Daily, nil, nil, "tui")
+	arch := store.addTaskSource("10:00", "", "archived", Once, nil, nil, "tui")
 	store.mu.Lock()
 	for i := range store.Tasks {
 		if store.Tasks[i].ID == arch.ID {

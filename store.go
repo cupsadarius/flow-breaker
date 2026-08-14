@@ -28,6 +28,7 @@ const (
 type Task struct {
 	ID         int             `json:"id"`
 	Time       string          `json:"time"`
+	Date       string          `json:"date,omitempty"` // YYYY-MM-DD; empty = today / every applicable recurrence day
 	Desc       string          `json:"desc"`
 	Recurrence Recurrence      `json:"recurrence"`
 	Days       []string        `json:"days,omitempty"`
@@ -73,6 +74,7 @@ func defaultSettings() Settings {
 
 type Store struct {
 	Tasks     []Task   `json:"tasks"`
+	Inbox     []Task   `json:"inbox"` // timeless captures; immortal (never reset, never archived)
 	LastReset string   `json:"last_reset"`
 	NextID    int      `json:"next_id"`
 	Settings  Settings `json:"settings"`
@@ -183,17 +185,19 @@ func (s *Store) saveLocked() {
 }
 
 func (s *Store) addTask(timeStr, desc string, rec Recurrence, tags, days []string) Task {
-	return s.addTaskSource(timeStr, desc, rec, tags, days, "")
+	return s.addTaskSource(timeStr, "", desc, rec, tags, days, "")
 }
 
-// addTaskSource is like addTask but stamps the Source field. It acquires the
-// write lock once and persists.
-func (s *Store) addTaskSource(timeStr, desc string, rec Recurrence, tags, days []string, source string) Task {
+// addTaskSource is like addTask but stamps the Source field. date is the
+// optional YYYY-MM-DD the task fires on ("" = today / every applicable
+// recurrence day). It acquires the write lock once and persists.
+func (s *Store) addTaskSource(timeStr, date, desc string, rec Recurrence, tags, days []string, source string) Task {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := Task{
 		ID:         s.NextID,
 		Time:       timeStr,
+		Date:       date,
 		Desc:       desc,
 		Recurrence: rec,
 		Days:       days,
@@ -204,6 +208,24 @@ func (s *Store) addTaskSource(timeStr, desc string, rec Recurrence, tags, days [
 	s.NextID++
 	s.Tasks = append(s.Tasks, t)
 	s.sortTasks()
+	s.saveLocked()
+	return t
+}
+
+// addInbox appends a timeless capture to the immortal inbox. It allocates an id
+// from NextID, stamps Desc/Source/CreatedAt, and persists atomically (locks once
+// + saveLocked). Inbox items are never reset or archived.
+func (s *Store) addInbox(desc, source string) Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := Task{
+		ID:        s.NextID,
+		Desc:      desc,
+		Source:    source,
+		CreatedAt: time.Now().Format(time.RFC3339),
+	}
+	s.NextID++
+	s.Inbox = append(s.Inbox, t)
 	s.saveLocked()
 	return t
 }
@@ -473,8 +495,16 @@ func (s *Store) resetDaily() {
 			continue
 		}
 		if s.Tasks[i].Recurrence == Once {
-			createdDate := createdOnDate(s.Tasks[i])
-			if createdDate.Before(startOfDay(now)) {
+			// A dated once-task survives until its Date has passed (archived only
+			// the day AFTER its Date); an undated one archives once its creation
+			// day is behind us, as before.
+			var archive bool
+			if s.Tasks[i].Date != "" {
+				archive = s.Tasks[i].Date < now.Format("2006-01-02")
+			} else {
+				archive = createdOnDate(s.Tasks[i]).Before(startOfDay(now))
+			}
+			if archive {
 				s.Tasks[i].Archived = true
 				s.Tasks[i].ArchivedAt = now.Format(time.RFC3339)
 			}
@@ -515,9 +545,17 @@ func shouldFireToday(t Task) bool {
 }
 
 // shouldFireTodayAt is shouldFireToday with an injectable clock (used by the
-// daemon scheduler so firing can be evaluated deterministically).
+// daemon scheduler so firing can be evaluated deterministically). This is the
+// single date-gate: a task carrying an explicit future/past Date never fires on
+// any other day, so the scheduler (via meetsFireWindow) and buildStatus (via
+// shouldFireToday) agree.
 func shouldFireTodayAt(t Task, now time.Time) bool {
 	if t.Archived {
+		return false
+	}
+	// An explicit Date pins the task to exactly that day; empty = today / every
+	// applicable recurrence day.
+	if t.Date != "" && t.Date != now.Format("2006-01-02") {
 		return false
 	}
 	return shouldFireOnDay(t, now.Weekday())
