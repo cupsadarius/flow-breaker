@@ -93,10 +93,12 @@ func dataDir() string {
 func dataPath() string { return filepath.Join(dataDir(), "tasks.json") }
 
 func loadStore() *Store {
-	s := &Store{}
+	// Seed defaults up front so a fresh data dir (no tasks.json yet) still yields
+	// working settings — otherwise a brand-new daemon would serve GET /settings
+	// with all alerts off and SnoozeMins:0. A present file overrides these.
+	s := &Store{NextID: 1, Settings: defaultSettings()}
 	data, err := os.ReadFile(dataPath())
 	if err != nil {
-		s.NextID = 1
 		return s
 	}
 	json.Unmarshal(data, s)

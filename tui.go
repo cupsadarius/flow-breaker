@@ -200,8 +200,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tickCmd(), syncCmd())
 
 	case syncMsg:
-		m.applySync(msg)
-		return m, nil
+		return m, m.applySync(msg)
 
 	case settingsMsg:
 		if msg.err == nil {
@@ -253,15 +252,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applySync folds a daemon refresh into the model. On success it replaces the
 // display cache and clears the offline flag; on any error it fails loud (sets
 // offline) while KEEPING the last-known cache — never a false empty/all-clear.
-func (m *model) applySync(msg syncMsg) {
+// Returns a command to run (a settings refetch when recovering from offline).
+func (m *model) applySync(msg syncMsg) tea.Cmd {
 	if msg.err != nil {
 		m.offline = true
-		return
+		return nil
 	}
+	wasOffline := m.offline
 	m.offline = false
 	m.lastSync = time.Now()
 	m.store.Tasks = msg.tasks
 	m.report = msg.report
+	m.clampCursors()
+	// Settings are fetched once at Init; if the daemon was down then (or the
+	// settings fetch failed), refresh them now that we've reconnected.
+	if wasOffline {
+		return fetchSettingsCmd()
+	}
+	return nil
+}
+
+// clampCursors keeps list cursors within bounds after the cache is replaced, so
+// an externally-shrunk list can't leave a highlight pointing past the end.
+func (m *model) clampCursors() {
+	if n := len(m.store.ActiveTasks()); m.cursor >= n {
+		m.cursor = n - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if n := len(m.store.ArchivedTasks()); m.archiveCursor >= n {
+		m.archiveCursor = n - 1
+	}
+	if m.archiveCursor < 0 {
+		m.archiveCursor = 0
+	}
 }
 
 // handleActionResult processes a mutation outcome: on error, fail loud; on
@@ -1119,7 +1144,10 @@ func (m model) View() string {
 
 	// offline banner — fail loud when the daemon is unreachable
 	if m.offline {
-		msg := fmt.Sprintf("⚠ daemon unreachable — stale as of %s", m.lastSync.Format("15:04"))
+		msg := "⚠ daemon unreachable — never synced"
+		if !m.lastSync.IsZero() {
+			msg = fmt.Sprintf("⚠ daemon unreachable — stale as of %s", m.lastSync.Format("15:04"))
+		}
 		b.WriteString(offlineStyle.Width(w).Render(msg))
 		b.WriteString("\n\n")
 	}

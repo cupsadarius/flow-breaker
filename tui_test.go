@@ -12,7 +12,9 @@ func TestApplySyncErrorGoesOffline(t *testing.T) {
 		report: prevReport,
 	}
 
-	m.applySync(syncMsg{err: ErrDaemonDown})
+	if cmd := m.applySync(syncMsg{err: ErrDaemonDown}); cmd != nil {
+		t.Fatalf("expected no command on error, got one")
+	}
 
 	if !m.offline {
 		t.Fatalf("offline = false, want true after fetch error")
@@ -32,7 +34,11 @@ func TestApplySyncSuccessUpdatesCache(t *testing.T) {
 	newTasks := []Task{{ID: 2, Desc: "new"}}
 	rep := &StatusReport{Nudge: "fresh"}
 
-	m.applySync(syncMsg{tasks: newTasks, report: rep})
+	// Recovering from offline should schedule a settings refetch.
+	cmd := m.applySync(syncMsg{tasks: newTasks, report: rep})
+	if cmd == nil {
+		t.Fatalf("expected settings-refetch command on offline→online recovery")
+	}
 
 	if m.offline {
 		t.Fatalf("offline = true, want false after successful sync")
@@ -45,5 +51,18 @@ func TestApplySyncSuccessUpdatesCache(t *testing.T) {
 	}
 	if m.lastSync.IsZero() {
 		t.Fatalf("lastSync not stamped")
+	}
+}
+
+// TestApplySyncClampsCursor verifies a shrunk task list pulls the cursor back
+// in-bounds so the highlight can't point past the end.
+func TestApplySyncClampsCursor(t *testing.T) {
+	m := &model{
+		store:  &Store{Tasks: []Task{{ID: 1}, {ID: 2}, {ID: 3}}},
+		cursor: 2,
+	}
+	m.applySync(syncMsg{tasks: []Task{{ID: 1}}, report: &StatusReport{}})
+	if m.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0 after list shrank to 1", m.cursor)
 	}
 }
