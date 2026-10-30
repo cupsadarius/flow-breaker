@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestApplySyncErrorGoesOffline verifies a failed daemon refresh flips the model
@@ -101,5 +103,28 @@ func TestSyncAlertEdges(t *testing.T) {
 func TestOscText(t *testing.T) {
 	if got := oscText("a;b\x1b]0;x\x07\nc"); got != "a b ]0 x  c" {
 		t.Fatalf("oscText = %q", got)
+	}
+}
+
+func TestGroupToday(t *testing.T) {
+	now := time.Date(2026, 10, 30, 13, 30, 0, 0, time.Local) // Friday
+	tasks := []Task{
+		{ID: 1, Time: "16:30", Recurrence: Daily},
+		{ID: 2, Time: "13:00", Recurrence: Daily},
+		{ID: 3, Time: "10:00", Recurrence: Daily, Done: true},
+		{ID: 4, Time: "15:00", Recurrence: Daily},
+		{ID: 5, Time: "11:30", Recurrence: Daily, Dismissed: true},
+		{ID: 6, Time: "12:00", Recurrence: Custom, Days: []string{"sat", "sun"}},
+	}
+	g := groupToday(tasks, now)
+	ids := func(ts []Task) []int {
+		var out []int
+		for _, t := range ts {
+			out = append(out, t.ID)
+		}
+		return out
+	}
+	if got := fmt.Sprint(ids(g.Overdue), ids(g.Next), ids(g.Later), ids(g.Done)); got != "[2] [4] [1] [3 5]" {
+		t.Fatalf("groups = %s, want [2] [4] [1] [3 5]", got)
 	}
 }
