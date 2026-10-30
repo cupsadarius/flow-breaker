@@ -172,11 +172,11 @@ func (m model) handleHabits(key string) (tea.Model, tea.Cmd) {
 func (m model) footerKeys() string {
 	switch m.focus {
 	case paneHabits:
-		return "⏎ jump to today  j/k move  tab next pane  / add  q quit"
+		return "⏎ jump to today  tab next pane  / add  ? more  q quit"
 	case paneInbox:
-		return "⏎ schedule  d delete  j/k move  tab next pane  / add  q quit"
+		return "⏎ schedule  d delete  tab next pane  / add  ? more"
 	}
-	return "⏎ done  s snooze  e edit  d delete  tab next pane  / add"
+	return "⏎ done  s snooze  e edit  tab next pane  / add  ? more"
 }
 
 // paneTitle renders "─ NAME ──── info ─" across width w.
@@ -444,4 +444,52 @@ func scheduleCmd(id int, text string) tea.Cmd {
 		}
 		return actionMsg{ok: "Scheduled", err: err}
 	}
+}
+
+// handleHelp routes the keys of the ? overlay, which also opens the screens
+// that have no key on the main screen.
+func (m model) handleHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.helpOpen = false
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "v":
+		if len(m.store.ArchivedTasks()) == 0 {
+			m.setMsg("No archived tasks")
+			return m, nil
+		}
+		m.archiveMode, m.archiveCursor = true, 0
+	case "f":
+		m.feedsMode, m.feedsCursor = true, 0
+		m.feedsList, _ = loadFeeds()
+	case "o":
+		m.settingsMode, m.settingsCursor = true, 0
+	}
+	return m, nil
+}
+
+func renderHelp() string {
+	rows := [][2]string{
+		{"tab / shift+tab", "move between Today, Habits, Inbox"},
+		{"j k g G", "move in the pane"},
+		{"/ or a", "quick add (ctrl+e: full form)"},
+		{"⏎", "Today: done · Habits: jump to slot · Inbox: schedule"},
+		{"s", "snooze (Today)"},
+		{"e", "edit (Today)"},
+		{"d", "delete (Today, Inbox)"},
+		{"⏎ on DONE", "expand or collapse done tasks"},
+		{"alarm", "space dismiss · s snooze · c done"},
+		{"", ""},
+		{"v", "archive"},
+		{"f", "calendar feeds"},
+		{"o", "settings"},
+		{"q", "quit"},
+	}
+	var b strings.Builder
+	b.WriteString(inputLabelStyle.Render("  Keys") + "\n\n")
+	for _, r := range rows {
+		b.WriteString(fmt.Sprintf("  %s  %s\n", inputActiveStyle.Render(fmt.Sprintf("%-16s", r[0])), r[1]))
+	}
+	b.WriteString("\n" + dimStyle.Render("  any other key closes"))
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("14")).Padding(1, 2).Render(b.String()) + "\n"
 }

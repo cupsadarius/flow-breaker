@@ -59,6 +59,7 @@ type model struct {
 	inboxCursor int
 	bar         barMode
 	barText     string
+	helpOpen    bool
 	// archive view
 	archiveMode   bool
 	archiveCursor int
@@ -203,6 +204,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.bar != barOff {
 			return m.handleBar(msg)
 		}
+		if m.helpOpen {
+			return m.handleHelp(msg)
+		}
 		if m.report != nil && m.report.AlarmFiring {
 			return m.handleAlarmKey(msg)
 		}
@@ -320,22 +324,8 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a", "/":
 		m.bar, m.barText = barAdd, ""
 		return m, nil
-	case "f":
-		m.feedsMode = true
-		m.feedsCursor = 0
-		m.feedsList, _ = loadFeeds()
-		return m, nil
-	case "o":
-		m.settingsMode = true
-		m.settingsCursor = 0
-		return m, nil
-	case "v":
-		if len(m.store.ArchivedTasks()) == 0 {
-			m.setMsg("No archived tasks")
-			return m, nil
-		}
-		m.archiveMode = true
-		m.archiveCursor = 0
+	case "?":
+		m.helpOpen = true
 		return m, nil
 	}
 	switch m.focus {
@@ -1010,6 +1000,8 @@ func (m model) View() string {
 		b.WriteString(m.renderFeeds())
 	case m.inputMode:
 		b.WriteString(m.renderInput())
+	case m.helpOpen:
+		b.WriteString(renderHelp())
 	default:
 		b.WriteString(m.renderPanes(w, h-used-3) + "\n")
 	}
@@ -1026,7 +1018,7 @@ func (m model) View() string {
 	if m.msg != "" && time.Now().Before(m.msgExpiry) {
 		b.WriteString(msgStyle.Render("  "+m.msg) + "\n")
 	}
-	if !m.inputMode && !m.confirmDel && !m.archiveMode && !m.settingsMode && !m.feedsMode {
+	if !m.inputMode && !m.confirmDel && !m.archiveMode && !m.settingsMode && !m.feedsMode && !m.helpOpen {
 		b.WriteString(m.barLine() + "\n")
 		b.WriteString(dimStyle.Render(" "+m.footerKeys()) + "\n")
 	}

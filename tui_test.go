@@ -235,3 +235,23 @@ func TestInboxEnterOpensSchedule(t *testing.T) {
 		t.Fatalf("bar = %d, want schedule", m.bar)
 	}
 }
+
+func TestHelpOverlayRoutes(t *testing.T) {
+	m := model{store: &Store{}, width: 120, height: 40}
+	m, _ = press(t, m, runes("o"))
+	if m.settingsMode {
+		t.Fatalf("o on the main screen opened settings")
+	}
+	m, _ = press(t, m, runes("?"))
+	if !m.helpOpen {
+		t.Fatalf("? did not open help")
+	}
+	m, _ = press(t, m, runes("o"))
+	if !m.settingsMode || m.helpOpen {
+		t.Fatalf("o in help: settings=%v help=%v", m.settingsMode, m.helpOpen)
+	}
+	m, _ = press(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.settingsMode {
+		t.Fatalf("esc did not close settings")
+	}
+}
