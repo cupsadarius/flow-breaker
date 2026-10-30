@@ -477,3 +477,31 @@ func TestScheduleInboxStampsCreatedNow(t *testing.T) {
 		t.Fatalf("CreatedAt day = %s, want today", got)
 	}
 }
+
+func TestMaterializeSkipsArchivedSameUID(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+	s.Tasks = []Task{{ID: 1, Time: "08:50", Desc: "Standup", Recurrence: Once, Source: "maccal", CalUID: "u1", Archived: true}}
+	s.NextID = 2
+	ev := CalendarEvent{UID: "u1", Summary: "Standup", StartTime: "23:58", EndTime: "23:59"}
+	added, _, _ := s.materializeCalendarFrom([]CalendarEvent{ev}, now, "maccal")
+	if added != 1 || len(s.Tasks) != 2 || !s.Tasks[0].Archived && !s.Tasks[1].Archived {
+		t.Fatalf("added=%d tasks=%+v", added, s.Tasks)
+	}
+	s.materializeCalendarFrom(nil, now, "maccal")
+	for _, tk := range s.Tasks {
+		if tk.ID == 1 {
+			return
+		}
+	}
+	t.Fatalf("reconcile deleted the archived task: %+v", s.Tasks)
+}
+
+func TestMaterializeSkipsEndedEvents(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 10, 30, 10, 0, 0, 0, time.Local)
+	ev := CalendarEvent{UID: "u1", Summary: "Morning sync", StartTime: "09:00", EndTime: "09:30"}
+	if added, _, _ := s.materializeCalendarFrom([]CalendarEvent{ev}, now, "maccal"); added != 0 {
+		t.Fatalf("added an event that already ended: %+v", s.Tasks)
+	}
+}

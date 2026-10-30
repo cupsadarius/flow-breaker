@@ -77,8 +77,8 @@ func TestRefreshCalendarMaterializesFromFeed(t *testing.T) {
 		"BEGIN:VEVENT\r\n" +
 		"UID:refresh-test-uid\r\n" +
 		"SUMMARY:Refresh Test\r\n" +
-		"DTSTART:" + today + "T120000\r\n" +
-		"DTEND:" + today + "T130000\r\n" +
+		"DTSTART:" + today + "T230000\r\n" +
+		"DTEND:" + today + "T235900\r\n" +
 		"END:VEVENT\r\n" +
 		"END:VCALENDAR\r\n"
 	icsPath := filepath.Join(dir, "cal.ics")

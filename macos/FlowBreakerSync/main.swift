@@ -9,10 +9,20 @@ let env = ProcessInfo.processInfo.environment
 let home = FileManager.default.homeDirectoryForCurrentUser
 let workAccount = "darius@optura.ai"
 let iso = ISO8601DateFormatter()
-let hhmm: DateFormatter = {
+func formatter(_ format: String) -> DateFormatter {
     let f = DateFormatter()
-    f.dateFormat = "HH:mm"
+    f.locale = Locale(identifier: "en_US_POSIX") // a 12-hour user setting must not change "HH:mm"
+    f.dateFormat = format
     return f
+}
+let hhmm = formatter("HH:mm")
+let day = formatter("yyyy-MM-dd")
+// Waits for the network after wake instead of failing at once.
+let session: URLSession = {
+    let c = URLSessionConfiguration.default
+    c.waitsForConnectivity = true
+    c.timeoutIntervalForResource = 120
+    return URLSession(configuration: c)
 }()
 
 func daemonURL() -> String {
@@ -61,7 +71,8 @@ func sync() {
         let declined = ev.attendees?.first(where: { $0.isCurrentUser })?.participantStatus == .declined
         let start = hhmm.string(from: ev.startDate)
         return [
-            "uid": (ev.calendarItemExternalIdentifier ?? ev.eventIdentifier ?? ev.title ?? "") + "@" + start,
+            // Occurrences of a recurring meeting share one external ID; the date keeps each day apart.
+            "uid": (ev.calendarItemExternalIdentifier ?? ev.eventIdentifier ?? ev.title ?? "") + "@" + day.string(from: ev.startDate) + "T" + start,
             "summary": ev.title ?? "",
             "start_time": start,
             "end_time": hhmm.string(from: ev.endDate),
@@ -78,14 +89,18 @@ func sync() {
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.httpBody = body
-    URLSession.shared.dataTask(with: req) { _, resp, err in
+    session.dataTask(with: req) { _, resp, err in
         DispatchQueue.main.async {
+            var failure = ""
             if let err = err {
-                writeStatus(events: payload.count, error: err.localizedDescription)
-                return
+                failure = err.localizedDescription
+            } else if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 {
+                failure = "daemon returned \(code)"
             }
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            writeStatus(events: payload.count, error: code == 200 ? "" : "daemon returned \(code)")
+            writeStatus(events: payload.count, error: String(failure.prefix(80)))
+            if !failure.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 60) { sync() }
+            }
         }
     }.resume()
 }
@@ -97,8 +112,9 @@ final class Delegate: NSObject, NSApplicationDelegate {
         store.requestFullAccessToEvents { granted, _ in
             DispatchQueue.main.async {
                 guard granted else {
+                    // Quit, so the next flow-breaker command starts a fresh copy that asks again.
                     writeStatus(events: 0, error: "calendar access denied")
-                    return
+                    exit(0)
                 }
                 sync()
                 NotificationCenter.default.addObserver(forName: .EKEventStoreChanged, object: store, queue: .main) { _ in sync() }

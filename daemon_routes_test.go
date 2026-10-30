@@ -819,3 +819,20 @@ func TestFeedRefreshKeepsMacEvents(t *testing.T) {
 		t.Fatalf("feed refresh dropped the mac event: %+v", store.ActiveTasks())
 	}
 }
+
+func TestCalendarEventsRouteValidates(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+	for _, body := range []map[string]any{
+		{},
+		{"events": []map[string]any{{"uid": "", "summary": "x", "start_time": "09:00"}}},
+		{"events": []map[string]any{{"uid": "u", "summary": "x", "start_time": "9am"}}},
+	} {
+		resp := doJSON(t, "POST", srv.URL+"/calendar/events", body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("body %v: status %d, want 400", body, resp.StatusCode)
+		}
+	}
+}

@@ -579,7 +579,7 @@ func (s *Store) materializeCalendarFrom(events []CalendarEvent, now time.Time, s
 
 		idx := -1
 		for i := range s.Tasks {
-			if s.Tasks[i].CalUID == ev.UID {
+			if s.Tasks[i].CalUID == ev.UID && !s.Tasks[i].Archived {
 				idx = i
 				break
 			}
@@ -604,6 +604,10 @@ func (s *Store) materializeCalendarFrom(events []CalendarEvent, now time.Time, s
 			// Ack state (Done/Snoozed/Missed/Dismissed) is deliberately preserved.
 			continue
 		}
+		// A meeting that already ended (Mac asleep until after it) never alarms.
+		if end, ok := parseTaskTimeAt(ev.EndTime, now); ok && ev.EndTime != "" && end.Before(now) {
+			continue
+		}
 		s.Tasks = append(s.Tasks, Task{
 			ID:         s.NextID,
 			Time:       timeStr,
@@ -621,7 +625,7 @@ func (s *Store) materializeCalendarFrom(events []CalendarEvent, now time.Time, s
 	// Reconcile vanished calendar tasks: drop un-acted ones, keep Done tombstones.
 	var remaining []Task
 	for _, t := range s.Tasks {
-		if t.Source == source && t.CalUID != "" && !eligible[t.CalUID] {
+		if t.Source == source && t.CalUID != "" && !t.Archived && !eligible[t.CalUID] {
 			if !t.Done {
 				dropped++
 				continue
