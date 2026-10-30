@@ -91,6 +91,11 @@ var (
 
 	// recurring
 	reEveryWeekday = regexp.MustCompile(`(?i)\bevery\s+weekdays?\s+at\s+(\d{1,2})(?::(\d{2}))?\b`)
+	// EN daily: "every day/night/evening/morning [at H[:MM]]". Checked before
+	// reAt, which would otherwise match the "at H" tail and fabricate a Once.
+	// "every weekday" cannot match here — \bday needs a boundary before "day",
+	// and "weekday" has none.
+	reEveryDay = regexp.MustCompile(`(?i)\bevery\s+(?:day|night|evening|morning)\b(?:\s+at\s+(\d{1,2})(?::(\d{2}))?)?`)
 	// RE2's \b is ASCII-only and won't match before "î" (U+00EE), so instead
 	// anchor on start-of-string or whitespace. Without this, "in"/"în" inside
 	// "din fiecare" / "puțin fiecare" would match and fabricate a daily task.
@@ -175,6 +180,21 @@ func parseHeuristics(text string, now time.Time) (ParseResult, bool) {
 		return ParseResult{
 			Time:       fmt.Sprintf("%02d:%02d", h, m),
 			Recurrence: Weekdays,
+			Desc:       strip(text, loc[0:2]),
+		}, true
+	}
+	if loc := reEveryDay.FindStringSubmatchIndex(text); loc != nil {
+		timeStr := ""
+		if group(text, loc, 2) != "" {
+			h, m, ok := resolveClock(group(text, loc, 2), group(text, loc, 4))
+			if !ok {
+				return ParseResult{}, false
+			}
+			timeStr = fmt.Sprintf("%02d:%02d", h, m)
+		}
+		return ParseResult{
+			Time:       timeStr,
+			Recurrence: Daily,
 			Desc:       strip(text, loc[0:2]),
 		}, true
 	}
@@ -300,8 +320,13 @@ func parseWithTimeout(text string, now time.Time, haiku HaikuFn, timeout time.Du
 	// valid() is cheap insurance on the heuristic leg too: a heuristic "hit" that
 	// isn't actually schedulable (e.g. a bare "în fiecare zi" with no time) falls
 	// through rather than being scheduled with no clock.
-	if res, ok := parseHeuristics(text, now); ok && res.valid() {
-		return res, "scheduled", "heuristics"
+	if res, ok := parseHeuristics(text, now); ok {
+		if res.Date == "" { // recurring heuristics leave Date unresolved
+			res.Date = now.Format("2006-01-02")
+		}
+		if res.valid() {
+			return res, "scheduled", "heuristics"
+		}
 	}
 	if !hasTimeSignal(text) {
 		return inboxFloor(text, now)

@@ -62,12 +62,15 @@ func TestParseHeuristics(t *testing.T) {
 		// recurrence day". A Date here would pin them to the creation day (C1).
 		{"every weekday at HH:MM", "standup every weekday at 09:30", ParseResult{Time: "09:30", Date: "", Recurrence: Weekdays, Desc: "standup"}, true},
 		{"în fiecare zi", "citește în fiecare zi la 20", ParseResult{Time: "20:00", Date: "", Recurrence: Daily, Desc: "citește"}, true},
+		{"every night at H (24h)", "meditate every night at 22", ParseResult{Time: "22:00", Date: "", Recurrence: Daily, Desc: "meditate"}, true},
+		{"every day at HH:MM", "vitamins every day at 08:00", ParseResult{Time: "08:00", Date: "", Recurrence: Daily, Desc: "vitamins"}, true},
 		// ── misses: AM/PM-ambiguous bare hours (1..11) → Haiku ──────────
 		{"bare 3 ambiguous", "call plumber at 3", ParseResult{}, false},
 		{"bare 8 ambiguous", "dinner at 8", ParseResult{}, false},
 		{"bare 11 ambiguous", "call at 11", ParseResult{}, false},
 		{"tomorrow bare 7 ambiguous", "gym tomorrow 7", ParseResult{}, false},
 		{"every weekday bare 9 ambiguous", "standup every weekday at 9", ParseResult{}, false},
+		{"every night bare 8 ambiguous", "meditate every night at 8", ParseResult{}, false},
 		// ── misses: invalid / out-of-range clock → Haiku or inbox ───────
 		{"invalid clock 25:99", "call at 25:99", ParseResult{}, false},
 		// ── misses: no time / over-match guards ─────────────────────────
@@ -248,4 +251,17 @@ func TestParseDispatch(t *testing.T) {
 			t.Fatalf("dest/by = %s/%s, want inbox/none", dest, by)
 		}
 	})
+}
+
+func TestParseRecurringHeuristicSchedules(t *testing.T) {
+	noHaiku := func(context.Context, string, time.Time) (ParseResult, error) {
+		t.Fatal("haiku called for a heuristic hit")
+		return ParseResult{}, nil
+	}
+	for _, text := range []string{"meditate every night at 22", "standup every weekday at 9:30"} {
+		res, dest, by := Parse(text, parseNow, noHaiku)
+		if dest != "scheduled" || by != "heuristics" || res.Date != "2026-01-05" {
+			t.Errorf("%q: got %s/%s date %q, want scheduled/heuristics date 2026-01-05", text, dest, by, res.Date)
+		}
+	}
 }
