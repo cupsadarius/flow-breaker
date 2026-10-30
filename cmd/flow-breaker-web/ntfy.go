@@ -143,8 +143,13 @@ func (s *ntfySub) stream(ctx context.Context) (opened bool, err error) {
 		}
 		s.lastID = msg.ID
 		a, ok := parseAlarm(msg)
-		if !ok || time.Since(time.Unix(msg.Time, 0)) > alarmFreshness {
-			continue // not an alarm, or a replay of one that already ended
+		if !ok {
+			continue
+		}
+		// A replay after a reconnect, or clock drift between the Pi and this Mac.
+		if age := time.Since(time.Unix(msg.Time, 0)); age > alarmFreshness {
+			log.Printf("ntfy: skip alarm %s, %s old", msg.ID, age.Round(time.Second))
+			continue
 		}
 		if err := s.push(alarmPayload(a)); err != nil {
 			log.Printf("push: %v", err)

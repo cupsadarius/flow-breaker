@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
@@ -29,6 +30,8 @@ var pushEndpointOK = func(u *url.URL) bool {
 	return false
 }
 
+var pushTimeout = 10 * time.Second
+
 // pusher holds the VAPID keys and the one phone subscription, both as 0600
 // files in dir.
 type pusher struct {
@@ -41,11 +44,16 @@ type pusher struct {
 func newPusher(dir, subject string) (*pusher, error) {
 	p := &pusher{dir: dir, subject: subject}
 	path := filepath.Join(dir, "vapid.json")
-	if data, err := os.ReadFile(path); err == nil {
+	data, err := os.ReadFile(path)
+	if err == nil {
 		if err := json.Unmarshal(data, &p.keys); err != nil {
 			return nil, fmt.Errorf("vapid.json: %w", err)
 		}
 		return p, nil
+	}
+	// Only a missing file means first run; new keys would break the phone's subscription.
+	if !os.IsNotExist(err) {
+		return nil, err
 	}
 	priv, pub, err := webpush.GenerateVAPIDKeys()
 	if err != nil {
@@ -115,6 +123,7 @@ func (p *pusher) Send(payload []byte) error {
 		VAPIDPrivateKey: p.keys.Private,
 		TTL:             15 * 60,
 		Urgency:         webpush.UrgencyHigh,
+		HTTPClient:      &http.Client{Timeout: pushTimeout}, // Send runs in the ntfy loop; a hang would stop all alarms
 	})
 	if err != nil {
 		return err

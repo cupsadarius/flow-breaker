@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
@@ -72,5 +73,47 @@ func TestSendGoneDeletesSubscription(t *testing.T) {
 	p.Send([]byte(`{"title":"x"}`))
 	if _, err := os.Stat(filepath.Join(dir, "push.json")); !os.IsNotExist(err) {
 		t.Fatalf("subscription not deleted after 410 (err %v)", err)
+	}
+}
+
+func TestSendTimesOut(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-block }))
+	defer srv.Close()
+	defer close(block)
+	prevOK, prevTimeout := pushEndpointOK, pushTimeout
+	pushEndpointOK = func(*url.URL) bool { return true }
+	pushTimeout = 200 * time.Millisecond
+	defer func() { pushEndpointOK, pushTimeout = prevOK, prevTimeout }()
+
+	p, _ := newPusher(t.TempDir(), "mailto:me@example.com")
+	p.Save(testSub(t, srv.URL+"/push"))
+	done := make(chan error, 1)
+	go func() { done <- p.Send([]byte(`{}`)) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("hung push returned no error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Send hung on a stalled push service")
+	}
+}
+
+func TestNewPusherKeepsUnreadableKeys(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := newPusher(dir, "mailto:me@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "vapid.json")
+	before, _ := os.ReadFile(path)
+	os.Chmod(path, 0)
+	defer os.Chmod(path, 0o600)
+	if _, err := newPusher(dir, "mailto:me@example.com"); err == nil {
+		t.Fatal("newPusher made new keys over an unreadable vapid.json")
+	}
+	os.Chmod(path, 0o600)
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatal("vapid.json was overwritten")
 	}
 }

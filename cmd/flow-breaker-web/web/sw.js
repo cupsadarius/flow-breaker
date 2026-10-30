@@ -34,8 +34,14 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
-// Push payload: {title, body, taskId, tag, priority}. The daemon repeats an
-// alarm every minute; the phone buzzes only when the priority rose.
+// The daemon repeats an alarm every minute. Buzz on a priority rise, or when
+// the notification on screen is older than one repeat (a new alarm).
+function shouldBuzz(prev, priority, now) {
+  if (!prev) return true;
+  return priority > ((prev.data && prev.data.priority) || 0) || now - prev.timestamp > 90_000;
+}
+
+// Push payload: {title, body, taskId, tag, priority}.
 self.addEventListener("push", (event) => {
   let m = {};
   try {
@@ -47,7 +53,7 @@ self.addEventListener("push", (event) => {
     const tag = m.tag || "flow-breaker";
     const priority = m.priority || 3;
     const [prev] = await self.registration.getNotifications({ tag });
-    const louder = !prev || priority > ((prev.data && prev.data.priority) || 0);
+    const louder = shouldBuzz(prev, priority, Date.now());
     const opts = {
       body: m.body || "",
       tag,
