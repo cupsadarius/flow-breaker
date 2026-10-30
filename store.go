@@ -485,21 +485,6 @@ func (s *Store) AllTasks() []Task {
 	return out
 }
 
-// activeIndex maps a position in the active-only view to the real index in s.Tasks.
-func (s *Store) activeIndex(activePos int) int {
-	count := 0
-	for i, t := range s.Tasks {
-		if t.Archived {
-			continue
-		}
-		if count == activePos {
-			return i
-		}
-		count++
-	}
-	return -1
-}
-
 func (s *Store) sortTasks() {
 	sort.Slice(s.Tasks, func(i, j int) bool {
 		return s.Tasks[i].Time < s.Tasks[j].Time

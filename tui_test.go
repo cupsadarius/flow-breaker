@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // TestApplySyncErrorGoesOffline verifies a failed daemon refresh flips the model
@@ -126,5 +128,76 @@ func TestGroupToday(t *testing.T) {
 	}
 	if got := fmt.Sprint(ids(g.Overdue), ids(g.Next), ids(g.Later), ids(g.Done)); got != "[2] [4] [1] [3 5]" {
 		t.Fatalf("groups = %s, want [2] [4] [1] [3 5]", got)
+	}
+}
+
+func press(t *testing.T, m model, k tea.KeyMsg) (model, tea.Cmd) {
+	t.Helper()
+	next, cmd := m.Update(k)
+	return next.(model), cmd
+}
+
+func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+
+// midDay skips tests whose "overdue" and "upcoming" fixtures would wrap past midnight.
+func midDay(t *testing.T) time.Time {
+	t.Helper()
+	now := time.Now()
+	if now.Hour() < 2 || now.Hour() > 21 {
+		t.Skip("needs a mid-day clock")
+	}
+	return now
+}
+
+func TestTabCyclesFocus(t *testing.T) {
+	m := model{store: &Store{}, width: 120, height: 40}
+	var want = []pane{paneHabits, paneInbox, paneToday}
+	for _, w := range want {
+		m, _ = press(t, m, tea.KeyMsg{Type: tea.KeyTab})
+		if m.focus != w {
+			t.Fatalf("focus = %d, want %d", m.focus, w)
+		}
+	}
+	m, _ = press(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.focus != paneInbox {
+		t.Fatalf("shift+tab focus = %d, want inbox", m.focus)
+	}
+}
+
+func TestOfflineBlocksDone(t *testing.T) {
+	now := midDay(t)
+	late := now.Add(-time.Hour).Format("15:04")
+	m := model{store: &Store{Tasks: []Task{{ID: 1, Time: late, Desc: "stretch", Recurrence: Daily}}}, offline: true, width: 120, height: 40}
+	m, cmd := press(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("expected no command while offline")
+	}
+	if m.msg != "daemon down" {
+		t.Fatalf("msg = %q, want daemon down", m.msg)
+	}
+}
+
+func TestEmptyStoreRenders(t *testing.T) {
+	m := model{store: &Store{}, width: 120, height: 40}
+	for _, k := range []tea.KeyMsg{runes("j"), runes("k"), {Type: tea.KeyEnter}, {Type: tea.KeyTab}, runes("j"), {Type: tea.KeyEnter}, {Type: tea.KeyTab}, runes("k")} {
+		m, _ = press(t, m, k)
+	}
+	v := m.View()
+	for _, s := range []string{"No tasks today", "No habits yet", "Inbox empty"} {
+		if !strings.Contains(v, s) {
+			t.Fatalf("view missing %q", s)
+		}
+	}
+}
+
+func TestViewShowsGroups(t *testing.T) {
+	now := midDay(t)
+	m := model{store: &Store{Tasks: []Task{
+		{ID: 1, Time: now.Add(-time.Hour).Format("15:04"), Desc: "stretch", Recurrence: Daily},
+		{ID: 2, Time: now.Add(time.Hour).Format("15:04"), Desc: "squats", Recurrence: Daily},
+	}}, width: 120, height: 40}
+	v := m.View()
+	if !strings.Contains(v, "OVERDUE") || !strings.Contains(v, "NEXT") || strings.Contains(v, "LATER") {
+		t.Fatalf("view groups wrong:\n%s", v)
 	}
 }
