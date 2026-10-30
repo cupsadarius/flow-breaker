@@ -16,11 +16,16 @@ import (
 
 type CalendarEvent struct {
 	ID           string `json:"id"`
+	UID          string `json:"uid"`
 	Summary      string `json:"summary"`
 	StartTime    string `json:"start_time"`
 	EndTime      string `json:"end_time"`
 	CalendarName string `json:"calendar_name"`
 	AllDay       bool   `json:"all_day"`
+	// Declined is a best-effort single-user heuristic: this is a personal
+	// secret-URL calendar, so any PARTSTAT=DECLINED line in the event means the
+	// user declined it. Declined events are never materialized as alarms.
+	Declined bool `json:"declined"`
 }
 
 type CalendarCache struct {
@@ -32,6 +37,12 @@ type CalendarCache struct {
 type CalendarFeed struct {
 	URL   string `json:"url"`
 	Label string `json:"label"`
+}
+
+// selfCalEmail is the user's own calendar address, used to self-scope the
+// DECLINED heuristic. Empty (unconfigured) disables declined-filtering entirely.
+func selfCalEmail() string {
+	return strings.ToLower(strings.TrimSpace(os.Getenv("FLOW_BREAKER_CAL_EMAIL")))
 }
 
 func feedsPath() string { return filepath.Join(dataDir(), "calendar_feeds.json") }
@@ -189,7 +200,7 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 	var events []CalendarEvent
 	inEvent := false
 	var uid, summary, dtStartRaw, dtStartTZID, dtEndRaw, dtEndTZID string
-	var dtStartIsDate bool
+	var dtStartIsDate, declined bool
 
 	for _, line := range lines {
 		if line == "BEGIN:VEVENT" {
@@ -197,6 +208,7 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 			uid, summary = "", ""
 			dtStartRaw, dtStartTZID, dtEndRaw, dtEndTZID = "", "", "", ""
 			dtStartIsDate = false
+			declined = false
 			continue
 		}
 		if line == "END:VEVENT" {
@@ -224,9 +236,11 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 						}
 						events = append(events, CalendarEvent{
 							ID:           uid,
+							UID:          uid,
 							Summary:      summary,
 							CalendarName: label,
 							AllDay:       true,
+							Declined:     declined,
 						})
 					}
 				} else {
@@ -245,10 +259,12 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 						}
 						events = append(events, CalendarEvent{
 							ID:           uid,
+							UID:          uid,
 							Summary:      summary,
 							StartTime:    startTime.In(now.Location()).Format("15:04"),
 							EndTime:      endTime.In(now.Location()).Format("15:04"),
 							CalendarName: label,
+							Declined:     declined,
 						})
 					}
 				}
@@ -258,6 +274,19 @@ func parseICalEvents(ical string, label string) []CalendarEvent {
 		}
 		if !inEvent {
 			continue
+		}
+
+		// Declined heuristic, self-scoped: only YOUR decline drops the event. A
+		// DECLINED partstat on a colleague's ATTENDEE line must NOT suppress an
+		// alarm you still plan to attend. So require the line to be an ATTENDEE
+		// line carrying PARTSTAT=DECLINED for your own address (case-insensitive).
+		// When FLOW_BREAKER_CAL_EMAIL is unset we can't identify "you", so we never
+		// mark Declined — better to over-alarm than silently miss.
+		if self := selfCalEmail(); self != "" &&
+			strings.HasPrefix(line, "ATTENDEE") &&
+			strings.Contains(line, "PARTSTAT=DECLINED") &&
+			strings.Contains(strings.ToLower(line), self) {
+			declined = true
 		}
 
 		// Parse property;params:value
@@ -348,8 +377,11 @@ func getCachedOrFetchEvents(feeds []CalendarFeed, cacheMins int) ([]CalendarEven
 		FetchedAt: time.Now().Format(time.RFC3339),
 		ForDate:   today,
 	}
+	// 0o600: the cache holds parsed private-calendar event summaries — the same
+	// secret content the cal-add hint tells users to guard, matching the feeds
+	// file's own 0o600.
 	cacheData, _ := json.MarshalIndent(cache, "", "  ")
-	os.WriteFile(cachePath(), cacheData, 0o644)
+	os.WriteFile(cachePath(), cacheData, 0o600)
 
 	return events, nil
 }

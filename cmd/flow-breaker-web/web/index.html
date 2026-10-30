@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1b1815">
+  <title>flow-breaker</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>⚡ flow-breaker</h1>
+    <span id="date"></span>
+    <button id="bell" type="button" aria-label="Turn on notifications">🔔</button>
+  </header>
+  <p id="stale" hidden></p>
+
+  <main>
+    <section aria-labelledby="today-h">
+      <h2 id="today-h">Today <span id="today-count"></span></h2>
+      <div id="today"></div>
+    </section>
+    <section aria-labelledby="habits-h">
+      <h2 id="habits-h">Habits</h2>
+      <div id="habits"></div>
+    </section>
+    <section aria-labelledby="inbox-h">
+      <h2 id="inbox-h">Inbox <span id="inbox-count"></span></h2>
+      <ul id="inbox"></ul>
+    </section>
+  </main>
+
+  <p id="toast" role="status" hidden></p>
+
+  <form id="add">
+    <input id="add-text" name="text" autocomplete="off" placeholder="standup every weekday at 9:30" aria-label="Add a task">
+    <button type="submit">Add</button>
+  </form>
+
+  <dialog id="sheet">
+    <form method="dialog">
+      <p id="sheet-title"></p>
+      <button value="done">Done</button>
+      <button value="snooze">Snooze</button>
+      <button value="edit">Change time</button>
+      <button value="cancel">Cancel</button>
+    </form>
+  </dialog>
+</body>
+</html>

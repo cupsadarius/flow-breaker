@@ -7,8 +7,8 @@ Terminal daily planner that breaks your flow — with alerts, habit tracking, an
 ## Features
 
 - **TUI planner** built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) + [Lip Gloss](https://github.com/charmbracelet/lipgloss)
-- **6 independent alert types** — notification, modal dialog, text-to-speech, system sound, terminal bell, tmux pane flash
-- **Habit tracker** — inline weekly dots per task, full-history grid view
+- **6 independent alert types** — notification, modal dialog, text-to-speech, system sound, terminal bell, pane switch (tmux or Rex)
+- **Habit tracker** — streaks and a 4-week grid per habit, computed by the daemon
 - **Unix socket API** — query status, nudge, next task, overdue list, alarm state from any script
 - **Status file** — JSON updated every 500ms while the TUI runs
 - **CLI commands** — add, list, done, clear, status, nudge without launching the TUI
@@ -75,24 +75,21 @@ flow-breaker add 14:00 "Call plumber" --repeat once
 
 ## TUI keybindings
 
-### Normal mode
+The TUI has three panes: **Today** (left), **Habits** and **Inbox** (right). A quick-add bar sits at the bottom. The footer shows the keys for the focused pane; `?` shows all keys.
+
+### Main screen
 
 | Key | Action |
 |-----|--------|
-| `a` | Add task |
-| `e` | Edit selected task |
-| `d` / `x` | Delete selected task (confirms with y/n) |
-| `c` | Toggle done |
-| `h` | Toggle habit tracker view |
-| `p` | Calendar events (import / timeline) |
-| `f` | Manage calendar feeds (or toggle full history in habit view) |
-| `v` | View archived one-off tasks |
-| `o` | Open settings |
-| `r` | Reload tasks from disk |
-| `j` / `down` | Move cursor down |
-| `k` / `up` | Move cursor up |
-| `g` | Jump to first task |
-| `G` | Jump to last task |
+| `tab` / `shift+tab` | Move focus between Today, Habits, Inbox |
+| `j` / `k` / `g` / `G` | Move in the focused pane |
+| `/` or `a` | Quick add: free text, sent to the capture parser (`ctrl+e` opens the full form) |
+| `enter` | Today: mark done · Habits: jump to the habit's next open slot · Inbox: schedule |
+| `enter` on `DONE (n)` | Expand or collapse done tasks |
+| `s` | Snooze (Today) |
+| `e` | Edit (Today) |
+| `d` / `x` | Delete with y/n confirm (Today, Inbox) |
+| `?` | Key list; opens Archive (`v`), Calendar feeds (`f`), Settings (`o`) |
 | `q` / `ctrl+c` | Quit |
 
 ### Alarm mode
@@ -105,85 +102,18 @@ When an alarm fires, the TUI shows a flashing bar and only these keys work:
 | `s` | Snooze (configurable minutes) |
 | `c` | Mark done and dismiss |
 
-### Add / Edit mode
+### Inbox
 
-Fields are filled in sequence: Time -> Description -> Recurrence -> Days (if applicable) -> Tags -> Confirm.
+Captures with no time land in the inbox. Press `enter` on an item and type a time (`at 15:00`, `tomorrow 9:30`); the item becomes a task and keeps its description.
 
-| Key | Action |
-|-----|--------|
-| `enter` | Advance to next field / confirm |
-| `esc` | Cancel |
-| `backspace` | Delete last character (time / description / tags fields) |
-| `j` / `k` / `tab` / `shift+tab` | Navigate recurrence options |
-| `h` / `l` / `tab` / `shift+tab` | Navigate day picker |
-| `space` | Toggle day on/off (day picker) / select recurrence |
-| `a`–`i` | Quick-fill time and description from calendar event (time field only, when calendar events are loaded) |
-| `y` / `enter` | Confirm at final step |
-| `n` | Cancel at final step |
+## Habits
 
-### Settings mode
+Every recurring task is a habit; tasks with the same description are one habit with several slots. The Habits pane shows per habit:
 
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Navigate settings |
-| `space` / `enter` | Toggle alert on/off |
-| `h` / `l` (left/right) | Adjust snooze duration (1–60 min) or calendar cache duration (1–120 min) |
-| `esc` / `o` | Save and close settings |
-| `q` | Quit |
+- the current streak: consecutive scheduled days with every slot done (a slot not yet due today does not break it),
+- a 4-week grid, Monday to Sunday (2 weeks on narrow terminals): green = done, red = missed or dismissed, dot = not scheduled or future.
 
-### Calendar mode
-
-Press `p` to open the calendar event picker (requires calendar to be enabled with at least one feed).
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Navigate events |
-| `space` | Toggle event selection |
-| `a` | Select all |
-| `enter` | Import selected events as tasks (tagged `gcal`) |
-| `t` | Toggle timeline view |
-| `r` | Refresh events (bypasses cache) |
-| `f` | Switch to feed management |
-| `q` / `ctrl+c` | Quit |
-| `esc` | Close |
-
-### Feed management mode
-
-Press `f` to manage iCal feeds.
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Navigate feeds |
-| `a` | Add a new feed (enter URL, then label) |
-| `d` / `x` | Delete selected feed (confirms with y/n) |
-| `q` / `ctrl+c` | Quit |
-| `esc` | Close |
-
-### Archive mode
-
-Press `v` to view archived one-off tasks.
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Navigate archived tasks |
-| `d` / `x` | Permanently delete archived task |
-| `v` / `esc` | Close |
-| `q` / `ctrl+c` | Quit |
-
-## Habit tracker
-
-Press `h` in the TUI to toggle the habit tracker view. It shows recurring tasks only with a dot grid:
-
-- **Weekly view** (default) — Mon through Sun of the current week
-- **Full history** — press `f` to expand to as many days as the terminal width allows
-
-Each cell shows:
-- `██` (green) — completed
-- `··` (yellow) — dismissed
-- `··` (red) — missed
-- blank — future day
-
-The main task list also shows inline weekly dots in the rightmost column.
+The daemon computes habits (`GET /habits`), so every client shows the same streaks.
 
 ## Alert system
 
@@ -191,12 +121,12 @@ Six alert types fire independently when a task becomes due. Toggle each on/off i
 
 | Alert | What it does | Requirement |
 |-------|-------------|-------------|
-| **Notification** | macOS Notification Center with "Glass" sound | macOS + `osascript` |
+| **Notification** | macOS Notification Center with "Glass" sound. In Rex: a Rex notification (OSC 777) instead | macOS + `osascript`, or Rex |
 | **Modal dialog** | AppleScript alert with Snooze/Done/Dismiss buttons | macOS + `osascript` |
 | **Text-to-speech** | `say -v Samantha` reads the task description | macOS |
 | **System sound** | Plays "Funk" system sound via `afplay` | macOS |
 | **Terminal bell** | Prints `\a` (BEL character) | Any terminal |
-| **Tmux flash** | Displays message + flashes pane red for 3 seconds | tmux session |
+| **Pane switch (tmux/Rex)** | tmux: switches to the pane, shows message, flashes it red for 3s. Rex: shows the session + tab, focuses the pane, marks it blocked (OSC 7501) until the alarm clears | tmux or Rex session |
 
 While an alarm is active the TUI also plays a "Ping" sound and terminal bell (`\a`) every ~5 seconds.
 
@@ -221,9 +151,7 @@ flow-breaker cal-feeds
 flow-breaker cal-remove "Work"
 ```
 
-In the TUI, press `p` to view today's events, toggle a timeline, and selectively import events as tasks. Imported events are tagged `gcal` and deduplicated on subsequent imports.
-
-Events are cached locally (default 15 minutes, configurable in settings). Press `r` in the calendar view to force a refresh.
+The daemon adds today's timed events as one-off tasks on each refresh. Events are cached (default 15 minutes, configurable in settings). In the TUI, `?` then `f` manages feeds.
 
 ## Integration
 
@@ -358,7 +286,7 @@ Settings are stored inside `tasks.json` and edited via the TUI settings screen (
 | Text-to-speech | on | on/off |
 | System sound | on | on/off |
 | Terminal bell | on | on/off |
-| Tmux flash | on | on/off |
+| Pane switch (tmux/Rex) | on | on/off |
 | Calendar enabled | off | on/off |
 | Calendar cache | 15 min | 1–120 min |
 

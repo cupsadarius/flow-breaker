@@ -1,0 +1,83 @@
+:root {
+  --bg: #1b1815;
+  --panel: #24201c;
+  --fg: #e8e2d8;
+  --dim: #8a8378;
+  --red: #e07a68;
+  --yellow: #e0bb62;
+  --green: #79b796;
+  --line: #3a342e;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.4 system-ui, sans-serif;
+  padding: env(safe-area-inset-top) 16px calc(88px + env(safe-area-inset-bottom));
+}
+
+header { display: flex; align-items: center; gap: 12px; padding: 14px 0 6px; }
+h1 { font-size: 18px; margin: 0; color: var(--yellow); }
+#date { color: var(--dim); flex: 1; }
+#bell { background: none; border: 0; font-size: 22px; min-width: 44px; min-height: 44px; }
+#bell.on { opacity: .35; }
+
+#stale { background: var(--red); color: var(--bg); padding: 8px 12px; border-radius: 8px; font-weight: 600; }
+body.stale button.row, body.stale #add button, body.stale .x { opacity: .4; pointer-events: none; }
+
+section { margin-top: 18px; }
+h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 0 0 6px; }
+h3 { font-size: 12px; margin: 12px 0 4px; letter-spacing: .06em; }
+h3.overdue { color: var(--red); }
+h3.next { color: var(--yellow); }
+h3.later, h3.done { color: var(--dim); }
+.empty { color: var(--dim); margin: 4px 0; }
+
+button.row {
+  display: flex; width: 100%; gap: 12px; align-items: baseline;
+  background: var(--panel); color: inherit; border: 0; border-radius: 10px;
+  padding: 12px; margin: 4px 0; text-align: left; font: inherit; min-height: 48px;
+}
+button.row .t { font-variant-numeric: tabular-nums; color: var(--dim); }
+button.row .d { flex: 1; overflow-wrap: anywhere; }
+button.row .s { color: var(--dim); font-size: 14px; white-space: nowrap; }
+button.row.overdue .s { color: var(--red); }
+button.row.next .s { color: var(--yellow); }
+details button.row { opacity: .55; }
+details summary { color: var(--dim); padding: 8px 0; cursor: pointer; }
+
+.habit { background: var(--panel); border-radius: 10px; padding: 10px 12px; margin: 4px 0; }
+.habit .top { display: flex; justify-content: space-between; gap: 8px; }
+.habit .streak { color: var(--yellow); white-space: nowrap; }
+.grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-top: 8px; max-width: 168px; }
+.grid i { aspect-ratio: 1; border-radius: 3px; background: var(--line); }
+.grid i.done { background: var(--green); }
+.grid i.missed { background: var(--red); }
+#week { color: var(--dim); font-size: 14px; }
+
+#inbox { list-style: none; padding: 0; margin: 0; }
+#inbox li { display: flex; gap: 6px; align-items: stretch; }
+#inbox button.row { flex: 1; }
+.x { background: var(--panel); color: var(--dim); border: 0; border-radius: 10px; margin: 4px 0; min-width: 48px; font-size: 18px; }
+
+#add {
+  position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); background: var(--bg); border-top: 1px solid var(--line);
+}
+#add input { flex: 1; min-height: 48px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); padding: 0 12px; font: inherit; }
+#add button { min-height: 48px; padding: 0 18px; border-radius: 10px; border: 0; background: var(--yellow); color: var(--bg); font-weight: 700; }
+
+#toast { position: fixed; left: 16px; right: 16px; bottom: calc(80px + env(safe-area-inset-bottom)); background: var(--panel); border: 1px solid var(--line); padding: 10px 12px; border-radius: 10px; margin: 0; }
+
+dialog { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 14px; width: min(92vw, 360px); }
+dialog::backdrop { background: rgb(0 0 0 / .6); }
+dialog form { display: grid; gap: 8px; }
+dialog p { margin: 0 0 4px; font-weight: 600; }
+dialog button { min-height: 48px; border-radius: 10px; border: 0; background: var(--bg); color: var(--fg); font: inherit; }
+dialog button[value="done"] { background: var(--green); color: var(--bg); font-weight: 700; }
+
+button:focus-visible, input:focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }

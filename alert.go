@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,19 +10,35 @@ import (
 	"time"
 )
 
-// ── tmux pane tracking ───────────────────────────────────────────────────────
+// ── Pane tracking: tmux or Rex ───────────────────────────────────────────────
 
-var tmuxPaneID string
+var (
+	tmuxPaneID string
+	rexSession string
+	rexBlock   string
+)
 
-func captureTmuxPane() {
+func capturePane() {
 	tmuxPaneID = os.Getenv("TMUX_PANE")
+	rexSession = os.Getenv("REX_SESSION")
+	rexBlock = os.Getenv("REX_BLOCK")
 }
 
-// ── Alerts: macOS native + tmux + terminal bell ────────────────────────────
+func inRex() bool {
+	return rexSession != "" && rexBlock != ""
+}
+
+// ── Alerts: macOS native + tmux/Rex pane + terminal bell ───────────────────
 
 func alertAll(title, body string, cfg *Settings) {
 	if cfg.AlertNotify {
-		macNotify(title, body)
+		// Rex posts OSC 777 as its own notification (Rex icon, click → pane);
+		// osascript would show up as Script Editor.
+		if inRex() {
+			rexNotify(title, body)
+		} else {
+			macNotify(title, body)
+		}
 	}
 	if cfg.AlertDialog {
 		macAlert(title, body, cfg.SnoozeMins)
@@ -35,7 +53,18 @@ func alertAll(title, body string, cfg *Settings) {
 		fmt.Print("\a")
 	}
 	if cfg.AlertTmux {
-		tmuxAlert(title + ": " + body)
+		if inRex() {
+			rexAlert(body)
+		} else {
+			tmuxAlert(title + ": " + body)
+		}
+	}
+}
+
+// clearPaneAlert drops the Rex "blocked" status once the alarm stops firing.
+func clearPaneAlert() {
+	if inRex() {
+		rexStatus("state=clear")
 	}
 }
 
@@ -141,6 +170,54 @@ func tmuxAlert(msg string) {
 			}
 		}()
 	}
+}
+
+// ── Rex ────────────────────────────────────────────────────────────────────
+//
+// Escape sequences go straight to stdout. Each is one small write(2), so it
+// cannot split a bubbletea frame (also written whole).
+
+func rexNotify(title, body string) {
+	os.Stdout.WriteString("\x1b]777;notify;" + oscText(title) + ";" + oscText(body) + "\x1b\\")
+}
+
+// rexAlert marks the pane blocked (OSC 7501: tab/session-picker badge) and
+// brings the pane on screen.
+func rexAlert(msg string) {
+	rexStatus("state=blocked:app=flow-breaker:msg=" +
+		base64.StdEncoding.EncodeToString([]byte(oscText(msg))))
+	go rexFocusPane()
+}
+
+func rexStatus(pairs string) {
+	os.Stdout.WriteString("\x1b]7501;" + pairs + "\x1b\\")
+}
+
+// rexFocusPane shows our session + tab in the Rex app, then focuses our pane.
+func rexFocusPane() {
+	args := []string{"do", "session.select", "session_id=" + rexSession}
+	out, err := exec.Command("rex", "block", "inspect", "-s", rexSession, rexBlock, "--json").Output()
+	var info struct {
+		Block struct {
+			WindowID string `json:"window_id"`
+		} `json:"block"`
+	}
+	if err == nil && json.Unmarshal(out, &info) == nil && info.Block.WindowID != "" {
+		args = append(args, "window_id="+info.Block.WindowID)
+	}
+	exec.Command("rex", args...).Run()
+	exec.Command("rex", "focus", "-s", rexSession, rexBlock).Run()
+}
+
+// oscText strips control characters (and ';', the OSC 777 field separator) so
+// task text can't end the sequence early or inject another one.
+func oscText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == ';' {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // ── Alarm state ────────────────────────────────────────────────────────────

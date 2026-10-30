@@ -1,15 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"net"
-	"os"
 	"strings"
 	"time"
 )
 
-// ── Status file + Unix socket (integration layer) ──────────────────────────
+// ── Status report (integration layer) ──────────────────────────────────────
 
 // StatusReport is what external tools (Claude Code, scripts) consume
 type StatusReport struct {
@@ -30,7 +27,17 @@ type TaskStatus struct {
 	Seconds   int    `json:"seconds"`
 }
 
+// buildStatus builds a StatusReport, taking the store read lock itself.
 func buildStatus(store *Store, alarm *alarmState) StatusReport {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	return buildStatusLocked(store, alarm)
+}
+
+// buildStatusLocked does the real work and assumes the caller already holds
+// store.mu for reading. Callers that need to resolve an alarm's task index and
+// build the report atomically (e.g. GET /status) use this under a single lock.
+func buildStatusLocked(store *Store, alarm *alarmState) StatusReport {
 	now := time.Now()
 	r := StatusReport{
 		Timestamp: now.Format(time.RFC3339),
@@ -40,7 +47,6 @@ func buildStatus(store *Store, alarm *alarmState) StatusReport {
 		r.AlarmFiring = true
 		t := store.Tasks[alarm.taskIdx]
 		r.AlarmTask = &t
-		r.Nudge = fmt.Sprintf("🚨 ALARM: %s — %s (do it NOW)", t.Time, t.Desc)
 	}
 
 	for _, t := range store.Tasks {
@@ -65,6 +71,21 @@ func buildStatus(store *Store, alarm *alarmState) StatusReport {
 		r.Next = &r.Upcoming[0]
 	}
 
+	// alarm firing: lead with the alarm, then list every other overdue task
+	if r.AlarmFiring {
+		r.Nudge = fmt.Sprintf("🚨 ALARM: %s — %s (do it NOW)", r.AlarmTask.Time, r.AlarmTask.Desc)
+		var others []string
+		for _, o := range r.Overdue {
+			if o.ID == r.AlarmTask.ID {
+				continue
+			}
+			others = append(others, fmt.Sprintf("%s (%s)", o.Desc, o.Time))
+		}
+		if len(others) > 0 {
+			r.Nudge += fmt.Sprintf(" · also overdue: %s", strings.Join(others, ", "))
+		}
+	}
+
 	// build nudge if no alarm
 	if !r.AlarmFiring {
 		if len(r.Overdue) > 0 {
@@ -85,94 +106,4 @@ func buildStatus(store *Store, alarm *alarmState) StatusReport {
 	}
 
 	return r
-}
-
-func writeStatusFile(store *Store, alarm *alarmState) {
-	report := buildStatus(store, alarm)
-	data, _ := json.MarshalIndent(report, "", "  ")
-	os.WriteFile(statusPath(), data, 0o644)
-}
-
-func startSocketServer(store *Store, alarm *alarmState) {
-	path := sockPath()
-	os.Remove(path) // clean up stale socket
-
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return
-	}
-	os.Chmod(path, 0o666)
-
-	go func() {
-		defer ln.Close()
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				continue
-			}
-			go handleConn(conn, store, alarm)
-		}
-	}()
-}
-
-func handleConn(conn net.Conn, store *Store, alarm *alarmState) {
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return
-	}
-
-	cmd := strings.TrimSpace(string(buf[:n]))
-
-	switch cmd {
-	case "status":
-		report := buildStatus(store, alarm)
-		data, _ := json.MarshalIndent(report, "", "  ")
-		conn.Write(data)
-	case "nudge":
-		report := buildStatus(store, alarm)
-		conn.Write([]byte(report.Nudge + "\n"))
-	case "next":
-		report := buildStatus(store, alarm)
-		if report.Next != nil {
-			data, _ := json.Marshal(report.Next)
-			conn.Write(data)
-		} else {
-			conn.Write([]byte(`{"nudge":"all clear"}`))
-		}
-	case "overdue":
-		report := buildStatus(store, alarm)
-		data, _ := json.Marshal(report.Overdue)
-		conn.Write(data)
-	case "alarm":
-		report := buildStatus(store, alarm)
-		if report.AlarmFiring {
-			data, _ := json.Marshal(report.AlarmTask)
-			conn.Write(data)
-		} else {
-			conn.Write([]byte("false\n"))
-		}
-	case "calendar":
-		if store.Settings.CalEnabled {
-			feeds, err := loadFeeds()
-			if err != nil {
-				conn.Write([]byte(fmt.Sprintf(`{"error":%q}`, err.Error()) + "\n"))
-				return
-			}
-			events, err := getCachedOrFetchEvents(feeds, store.Settings.CalCacheMins)
-			if err != nil {
-				conn.Write([]byte(fmt.Sprintf(`{"error":%q}`, err.Error()) + "\n"))
-			} else {
-				data, _ := json.Marshal(events)
-				conn.Write(data)
-			}
-		} else {
-			conn.Write([]byte(`{"error":"calendar not enabled"}` + "\n"))
-		}
-	default:
-		conn.Write([]byte(`{"error":"unknown command","commands":["status","nudge","next","overdue","alarm","calendar"]}` + "\n"))
-	}
 }
