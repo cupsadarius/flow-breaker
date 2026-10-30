@@ -836,3 +836,17 @@ func TestCalendarEventsRouteValidates(t *testing.T) {
 		}
 	}
 }
+
+func TestCaptureRejectsEmptyText(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", srv.URL+"/capture", map[string]any{"text": "  ", "source": "phone"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if n := len(store.InboxItems()); n != 0 {
+		t.Fatalf("inbox has %d items, want 0", n)
+	}
+}

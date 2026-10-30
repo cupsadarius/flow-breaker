@@ -76,6 +76,10 @@ func handleCapture(store *Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if strings.TrimSpace(body.Text) == "" {
+			writeError(w, http.StatusBadRequest, "text is empty")
+			return
+		}
 		source := defaultSource(body.Source)
 		res, dest, parsedBy := DefaultParse(body.Text, time.Now())
 
