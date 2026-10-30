@@ -57,6 +57,8 @@ type model struct {
 	doneOpen    bool // DONE group expanded in the Today pane
 	habitCursor int
 	inboxCursor int
+	bar         barMode
+	barText     string
 	// archive view
 	archiveMode   bool
 	archiveCursor int
@@ -198,6 +200,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inputMode {
 			return m.handleInput(msg)
 		}
+		if m.bar != barOff {
+			return m.handleBar(msg)
+		}
 		if m.report != nil && m.report.AlarmFiring {
 			return m.handleAlarmKey(msg)
 		}
@@ -312,12 +317,8 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.focus = (m.focus + 2) % 3
 		return m, nil
-	case "a":
-		if m.offline {
-			m.setMsg("daemon down")
-			return m, nil
-		}
-		m.startInput(Task{Recurrence: Daily})
+	case "a", "/":
+		m.bar, m.barText = barAdd, ""
 		return m, nil
 	case "f":
 		m.feedsMode = true
@@ -343,8 +344,7 @@ func (m model) handleNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case paneHabits:
 		return m.handleHabits(key)
 	}
-	m.inboxCursor = moveCursor(m.inboxCursor, len(m.inbox), key)
-	return m, nil
+	return m.handleInbox(key)
 }
 
 // startInput opens the add/edit form prefilled from t; t.ID 0 means add.
@@ -395,6 +395,10 @@ func (m model) handleConfirmDel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.offline {
 			m.setMsg("daemon down")
 			return m, nil
+		}
+		if t, ok := m.selectedInbox(); ok {
+			return m, taskActionCmd("DELETE", fmt.Sprintf("/inbox/%d", t.ID),
+				map[string]any{"source": "tui"}, "Deleted from inbox")
 		}
 		if t, ok := m.selectedTask(); ok {
 			return m, taskActionCmd("DELETE", fmt.Sprintf("/task/%d", t.ID),
@@ -1011,7 +1015,11 @@ func (m model) View() string {
 	}
 
 	if m.confirmDel {
-		if t, ok := m.selectedTask(); ok {
+		t, ok := m.selectedInbox()
+		if !ok {
+			t, ok = m.selectedTask()
+		}
+		if ok {
 			b.WriteString(urgentStyle.Render(fmt.Sprintf("  Delete '%s'? (y/n)", t.Desc)) + "\n")
 		}
 	}
@@ -1019,6 +1027,7 @@ func (m model) View() string {
 		b.WriteString(msgStyle.Render("  "+m.msg) + "\n")
 	}
 	if !m.inputMode && !m.confirmDel && !m.archiveMode && !m.settingsMode && !m.feedsMode {
+		b.WriteString(m.barLine() + "\n")
 		b.WriteString(dimStyle.Render(" "+m.footerKeys()) + "\n")
 	}
 

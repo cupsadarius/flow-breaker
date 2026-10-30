@@ -201,3 +201,37 @@ func TestViewShowsGroups(t *testing.T) {
 		t.Fatalf("view groups wrong:\n%s", v)
 	}
 }
+
+func TestSlashOpensBar(t *testing.T) {
+	m := model{store: &Store{}, width: 120, height: 40}
+	m, _ = press(t, m, runes("/"))
+	if m.bar != barAdd {
+		t.Fatalf("bar = %d, want add", m.bar)
+	}
+	for _, r := range "abc" {
+		m, _ = press(t, m, runes(string(r)))
+	}
+	if m.barText != "abc" {
+		t.Fatalf("barText = %q, want abc", m.barText)
+	}
+	m, _ = press(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.bar != barOff {
+		t.Fatalf("bar = %d after esc, want off", m.bar)
+	}
+}
+
+func TestCaptureEchoShown(t *testing.T) {
+	m := model{store: &Store{}}
+	next, _ := m.handleActionResult(actionMsg{ok: "📥 inbox — x"})
+	if got := next.(model).msg; got != "📥 inbox — x" {
+		t.Fatalf("msg = %q", got)
+	}
+}
+
+func TestInboxEnterOpensSchedule(t *testing.T) {
+	m := model{store: &Store{}, inbox: []Task{{ID: 7, Desc: "call plumber"}}, focus: paneInbox, width: 120, height: 40}
+	m, _ = press(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.bar != barSchedule {
+		t.Fatalf("bar = %d, want schedule", m.bar)
+	}
+}

@@ -172,11 +172,11 @@ func (m model) handleHabits(key string) (tea.Model, tea.Cmd) {
 func (m model) footerKeys() string {
 	switch m.focus {
 	case paneHabits:
-		return "⏎ jump to today  j/k move  tab next pane  a add  q quit"
+		return "⏎ jump to today  j/k move  tab next pane  / add  q quit"
 	case paneInbox:
-		return "j/k move  tab next pane  a add  q quit"
+		return "⏎ schedule  d delete  j/k move  tab next pane  / add  q quit"
 	}
-	return "⏎ done  s snooze  e edit  d delete  tab next pane  a add"
+	return "⏎ done  s snooze  e edit  d delete  tab next pane  / add"
 }
 
 // paneTitle renders "─ NAME ──── info ─" across width w.
@@ -340,4 +340,108 @@ func (m model) renderInboxPane(w, h int) string {
 		lines = append(lines[:1], lines[1+off:]...)
 	}
 	return box(lines, w, h)
+}
+
+type barMode int
+
+const (
+	barOff barMode = iota
+	barAdd
+	barSchedule
+)
+
+func (m model) selectedInbox() (Task, bool) {
+	if m.focus != paneInbox || m.inboxCursor >= len(m.inbox) {
+		return Task{}, false
+	}
+	return m.inbox[m.inboxCursor], true
+}
+
+func (m model) handleInbox(key string) (tea.Model, tea.Cmd) {
+	m.inboxCursor = moveCursor(m.inboxCursor, len(m.inbox), key)
+	if _, ok := m.selectedInbox(); !ok {
+		return m, nil
+	}
+	switch key {
+	case "enter":
+		m.bar, m.barText = barSchedule, ""
+	case "d", "x":
+		m.confirmDel = true
+	}
+	return m, nil
+}
+
+// handleBar edits the quick-add line; enter sends it as a capture or as the
+// schedule text for the selected inbox item.
+func (m model) handleBar(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Paste {
+		m.barText += string(msg.Runes)
+		return m, nil
+	}
+	switch key := msg.String(); key {
+	case "esc":
+		m.bar = barOff
+	case "ctrl+e":
+		if m.bar == barAdd {
+			m.bar = barOff
+			m.startInput(Task{Desc: m.barText, Recurrence: Daily})
+		}
+	case "backspace", "ctrl+h":
+		if r := []rune(m.barText); len(r) > 0 {
+			m.barText = string(r[:len(r)-1])
+		}
+	case "enter":
+		text := strings.TrimSpace(m.barText)
+		mode := m.bar
+		m.bar = barOff
+		if text == "" {
+			return m, nil
+		}
+		if m.offline {
+			m.setMsg("daemon down")
+			return m, nil
+		}
+		if mode == barAdd {
+			return m, captureCmd(text)
+		}
+		if t, ok := m.selectedInbox(); ok {
+			return m, scheduleCmd(t.ID, text)
+		}
+	default:
+		if len(msg.Runes) > 0 {
+			m.barText += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+func (m model) barLine() string {
+	switch m.bar {
+	case barAdd:
+		return inputActiveStyle.Render(" + " + m.barText + "█")
+	case barSchedule:
+		return inputActiveStyle.Render(" when? "+m.barText+"█") + dimStyle.Render("  e.g. at 15:00, tomorrow 9:30")
+	}
+	return dimStyle.Render(` + add: "standup every weekday at 9:30"  (/)`)
+}
+
+// captureCmd sends free text to POST /capture and reports the daemon's echo.
+func captureCmd(text string) tea.Cmd {
+	return func() tea.Msg {
+		var out struct {
+			Echo string `json:"echo"`
+		}
+		err := newClientTimeout(10*time.Second).Post("/capture", map[string]any{"text": text, "source": "tui"}, &out)
+		return actionMsg{ok: out.Echo, err: err}
+	}
+}
+
+func scheduleCmd(id int, text string) tea.Cmd {
+	return func() tea.Msg {
+		err := newClientTimeout(10*time.Second).Post(fmt.Sprintf("/inbox/%d/schedule", id), map[string]any{"text": text, "source": "tui"}, nil)
+		if err != nil && strings.Contains(err.Error(), "no time found") {
+			return actionMsg{err: fmt.Errorf("no time found — try 'at 15:00'")}
+		}
+		return actionMsg{ok: "Scheduled", err: err}
+	}
 }
