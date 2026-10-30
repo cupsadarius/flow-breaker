@@ -1,0 +1,21 @@
+# Run from this directory: docker compose up -d --build
+services:
+  flow-breaker-web:
+    build:
+      context: ../..
+      dockerfile: cmd/flow-breaker-web/Dockerfile
+    image: flow-breaker-web
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8091:8091"
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ["CMD", "/web", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  data:

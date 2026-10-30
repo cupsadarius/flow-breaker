@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,14 @@ func newMux(cfg config, p *pusher) http.Handler {
 
 func main() {
 	cfg := loadConfig()
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		_, port, _ := strings.Cut(cfg.addr, ":")
+		resp, err := http.Get("http://127.0.0.1:" + port + "/api/health")
+		if err != nil || resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		return
+	}
 	p, err := newPusher(cfg.data, cfg.subject)
 	if err != nil {
 		log.Fatal(err)
