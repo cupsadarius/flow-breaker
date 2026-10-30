@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -24,5 +26,40 @@ func TestCalSyncWarning(t *testing.T) {
 		if got := calSyncWarning(c.st, now); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+func TestStartCalSyncOnlyWhenInstalled(t *testing.T) {
+	home := t.TempDir()
+	var opened []string
+	prev := openApp
+	openApp = func(p string) error { opened = append(opened, p); return nil }
+	defer func() { openApp = prev }()
+
+	startCalSync("darwin", home)
+	if len(opened) != 0 {
+		t.Fatalf("opened %v without an installed app", opened)
+	}
+	app := filepath.Join(home, "Applications", "FlowBreakerSync.app")
+	if err := os.MkdirAll(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	startCalSync("darwin", home)
+	if len(opened) != 1 || opened[0] != app {
+		t.Fatalf("opened = %v, want [%s]", opened, app)
+	}
+}
+
+func TestStartCalSyncSkipsLinux(t *testing.T) {
+	home := t.TempDir()
+	os.MkdirAll(filepath.Join(home, "Applications", "FlowBreakerSync.app"), 0o755)
+	called := false
+	prev := openApp
+	openApp = func(string) error { called = true; return nil }
+	defer func() { openApp = prev }()
+
+	startCalSync("linux", home)
+	if called {
+		t.Fatal("opened the app on linux")
 	}
 }

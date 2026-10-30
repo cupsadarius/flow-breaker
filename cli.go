@@ -459,7 +459,7 @@ func calAdd(args []string, out io.Writer) error {
 		s.save()
 	}
 
-	fmt.Fprintf(out, "✓ Feed added: %s\n✓ Calendar enabled\n\nNext steps:\n  flow-breaker cal-list    see today's events\n  Launch TUI → press 'p'   import events as tasks\n", label)
+	fmt.Fprintf(out, "✓ Feed added: %s\n✓ Calendar enabled\n\nNext steps:\n  flow-breaker cal-list    see today's events\n  the daemon adds today's events as tasks on its next refresh\n", label)
 	fmt.Fprintln(out, calSecretURLHint)
 	return nil
 }
@@ -1428,6 +1428,7 @@ CALENDAR:
   flow-breaker cal-remove <q>   remove a feed by URL or label
   flow-breaker cal-feeds        list configured feeds
   flow-breaker cal-list         show today's calendar events
+  flow-breaker cal-sync [--install]  sync macOS Calendar to the daemon (status, or install the helper)
 
 SETUP:
   flow-breaker claude-install    install Claude Code hook + instructions

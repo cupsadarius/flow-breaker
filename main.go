@@ -3,11 +3,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
+	if len(os.Args) < 2 || os.Args[1] != "daemon" {
+		home, _ := os.UserHomeDir()
+		startCalSync(runtime.GOOS, home)
+	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "add":
@@ -38,6 +43,8 @@ func main() {
 			cliCalFeeds()
 		case "cal-list":
 			cliCalList()
+		case "cal-sync":
+			cliCalSync(os.Args[2:])
 		case "claude-install":
 			cliClaudeInstall()
 		case "opencode-install":
