@@ -35,12 +35,16 @@ func newDaemonMux(store *Store, sc *scheduler) *http.ServeMux {
 	mux.HandleFunc("POST /task/{id}/dismiss", handleDismiss(store))
 	mux.HandleFunc("POST /task/{id}", handleEdit(store))
 	mux.HandleFunc("DELETE /task/{id}", handleDelete(store))
+	mux.HandleFunc("POST /inbox/{id}/schedule", handleInboxSchedule(store))
+	mux.HandleFunc("DELETE /inbox/{id}", handleInboxDelete(store))
 
 	// Read routes.
 	mux.HandleFunc("GET /tasks", handleTasks(store))
 	mux.HandleFunc("GET /status", handleStatus(store, sc))
 	mux.HandleFunc("GET /nudge", handleNudge(store, sc))
 	mux.HandleFunc("GET /settings", handleGetSettings(store))
+	mux.HandleFunc("GET /inbox", handleInbox(store))
+	mux.HandleFunc("GET /habits", handleHabits(store))
 
 	return mux
 }

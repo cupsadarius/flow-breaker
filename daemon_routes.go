@@ -325,3 +325,66 @@ func handleNudge(store *Store, sc *scheduler) http.HandlerFunc {
 		w.Write([]byte(report.Nudge))
 	}
 }
+
+// handleHabits handles GET /habits.
+func handleHabits(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hs := buildHabits(store.ActiveTasks(), time.Now())
+		if hs == nil {
+			hs = []Habit{}
+		}
+		writeJSON(w, http.StatusOK, hs)
+	}
+}
+
+// handleInbox handles GET /inbox.
+func handleInbox(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, store.InboxItems())
+	}
+}
+
+// handleInboxSchedule handles POST /inbox/{id}/schedule. The text supplies
+// only the time and recurrence; the item keeps its description.
+func handleInboxSchedule(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		var body struct {
+			Text   string `json:"text"`
+			Source string `json:"source"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		res, dest, _ := DefaultParse(body.Text, time.Now())
+		if dest != "scheduled" {
+			writeError(w, http.StatusUnprocessableEntity, "no time found")
+			return
+		}
+		t, err := store.scheduleInbox(id, res, defaultSource(body.Source))
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"task": t})
+	}
+}
+
+// handleInboxDelete handles DELETE /inbox/{id}.
+func handleInboxDelete(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		if err := store.deleteInbox(id); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}
+}

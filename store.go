@@ -234,6 +234,52 @@ func (s *Store) addInbox(desc, source string) Task {
 	return t
 }
 
+// InboxItems returns a copy of the inbox.
+func (s *Store) InboxItems() []Task {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]Task{}, s.Inbox...)
+}
+
+func (s *Store) findInboxByID(id int) (int, error) {
+	for i := range s.Inbox {
+		if s.Inbox[i].ID == id {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("inbox item %d not found", id)
+}
+
+// scheduleInbox moves an inbox item to the tasks, timed by res. The task keeps
+// the item's ID, Desc and Source.
+func (s *Store) scheduleInbox(id int, res ParseResult, source string) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, err := s.findInboxByID(id)
+	if err != nil {
+		return Task{}, err
+	}
+	t := s.Inbox[i]
+	t.Time, t.Date, t.Recurrence, t.Days, t.Source = res.Time, res.Date, res.Recurrence, res.Days, source
+	s.Inbox = append(s.Inbox[:i], s.Inbox[i+1:]...)
+	s.Tasks = append(s.Tasks, t)
+	s.sortTasks()
+	s.saveLocked()
+	return t, nil
+}
+
+func (s *Store) deleteInbox(id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, err := s.findInboxByID(id)
+	if err != nil {
+		return err
+	}
+	s.Inbox = append(s.Inbox[:i], s.Inbox[i+1:]...)
+	s.saveLocked()
+	return nil
+}
+
 // markDone sets Done=true, stamps Source, and persists. Returns the updated
 // task, or an error if the id is not found. Acquires the write lock once.
 func (s *Store) markDone(id int, source string) (Task, error) {

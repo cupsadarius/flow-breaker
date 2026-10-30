@@ -702,3 +702,87 @@ func TestInterruptWorthyBoundary(t *testing.T) {
 		t.Fatal("Next.Seconds == 599 should be interrupt-worthy")
 	}
 }
+
+func TestHabitsRoute(t *testing.T) {
+	store := newTestStore(t)
+	store.addTaskSource("18:00", "", "read", Daily, nil, nil, "cli")
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "GET", srv.URL+"/habits", nil)
+	defer resp.Body.Close()
+	var hs []Habit
+	if err := json.NewDecoder(resp.Body).Decode(&hs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(hs) != 1 || hs[0].Name != "read" {
+		t.Fatalf("habits = %+v, want one named read", hs)
+	}
+}
+
+func TestInboxScheduleRoute(t *testing.T) {
+	store := newTestStore(t)
+	item := store.addInbox("call plumber", "cli")
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", fmt.Sprintf("%s/inbox/%d/schedule", srv.URL, item.ID), map[string]any{"text": "at 15:00"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if len(store.InboxItems()) != 0 {
+		t.Fatalf("inbox not emptied: %+v", store.InboxItems())
+	}
+	tasks := store.ActiveTasks()
+	if len(tasks) != 1 || tasks[0].Desc != "call plumber" || tasks[0].Time != "15:00" || tasks[0].Recurrence != Once {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+}
+
+func TestInboxScheduleNoTime(t *testing.T) {
+	store := newTestStore(t)
+	item := store.addInbox("renew passport", "cli")
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", fmt.Sprintf("%s/inbox/%d/schedule", srv.URL, item.ID), map[string]any{"text": "someday"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", resp.StatusCode)
+	}
+	if len(store.InboxItems()) != 1 {
+		t.Fatalf("item left the inbox: %+v", store.InboxItems())
+	}
+}
+
+func TestInboxDeleteRoute(t *testing.T) {
+	store := newTestStore(t)
+	item := store.addInbox("x", "cli")
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	url := fmt.Sprintf("%s/inbox/%d", srv.URL, item.ID)
+	if resp := doJSON(t, "DELETE", url, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first delete = %d, want 200", resp.StatusCode)
+	}
+	if len(store.InboxItems()) != 0 {
+		t.Fatalf("inbox not empty")
+	}
+	if resp := doJSON(t, "DELETE", url, nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("second delete = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestInboxEmptyIsArray(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "GET", srv.URL+"/inbox", nil)
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if strings.TrimSpace(string(b)) != "[]" {
+		t.Fatalf("body = %q, want []", b)
+	}
+}
