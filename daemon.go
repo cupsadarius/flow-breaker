@@ -37,6 +37,7 @@ func newDaemonMux(store *Store, sc *scheduler) *http.ServeMux {
 	mux.HandleFunc("DELETE /task/{id}", handleDelete(store))
 	mux.HandleFunc("POST /inbox/{id}/schedule", handleInboxSchedule(store))
 	mux.HandleFunc("DELETE /inbox/{id}", handleInboxDelete(store))
+	mux.HandleFunc("POST /calendar/events", handleCalendarEvents(store))
 
 	// Read routes.
 	mux.HandleFunc("GET /tasks", handleTasks(store))

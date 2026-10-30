@@ -388,3 +388,19 @@ func handleInboxDelete(store *Store) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }
+
+// handleCalendarEvents handles POST /calendar/events: today's events pushed by
+// the Mac calendar helper, materialized as Source "maccal".
+func handleCalendarEvents(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Events []CalendarEvent `json:"events"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		added, updated, dropped := store.materializeCalendarFrom(body.Events, time.Now(), "maccal")
+		writeJSON(w, http.StatusOK, map[string]any{"added": added, "updated": updated, "dropped": dropped})
+	}
+}

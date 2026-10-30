@@ -786,3 +786,36 @@ func TestInboxEmptyIsArray(t *testing.T) {
 		t.Fatalf("body = %q, want []", b)
 	}
 }
+
+func TestCalendarEventsRoute(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", srv.URL+"/calendar/events", map[string]any{
+		"events": []map[string]any{{"uid": "e1", "summary": "Standup", "start_time": "09:00"}},
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	tasks := store.ActiveTasks()
+	if len(tasks) != 1 || tasks[0].Source != "maccal" || tasks[0].CalUID != "e1" {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+}
+
+func TestFeedRefreshKeepsMacEvents(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+
+	resp := doJSON(t, "POST", srv.URL+"/calendar/events", map[string]any{
+		"events": []map[string]any{{"uid": "e1", "summary": "Standup", "start_time": "09:00"}},
+	})
+	resp.Body.Close()
+	store.materializeCalendar(nil, time.Now())
+	if len(store.ActiveTasks()) != 1 {
+		t.Fatalf("feed refresh dropped the mac event: %+v", store.ActiveTasks())
+	}
+}

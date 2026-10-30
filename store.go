@@ -554,6 +554,12 @@ func calendarAlarmTime(start string, now time.Time) (timeStr, dateStr string, ok
 //     set is deleted if un-acted (!Done, counts as dropped); a Done one is kept
 //     (harmless — the daily reset archives it).
 func (s *Store) materializeCalendar(events []CalendarEvent, now time.Time) (added, updated, dropped int) {
+	return s.materializeCalendarFrom(events, now, "calendar")
+}
+
+// materializeCalendarFrom is materializeCalendar for one event source; it
+// reconciles only tasks with that Source, so feeds and Mac pushes coexist.
+func (s *Store) materializeCalendarFrom(events []CalendarEvent, now time.Time, source string) (added, updated, dropped int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -605,7 +611,7 @@ func (s *Store) materializeCalendar(events []CalendarEvent, now time.Time) (adde
 			Desc:       ev.Summary,
 			Recurrence: Once,
 			CreatedAt:  now.Format(time.RFC3339),
-			Source:     "calendar",
+			Source:     source,
 			CalUID:     ev.UID,
 		})
 		s.NextID++
@@ -615,7 +621,7 @@ func (s *Store) materializeCalendar(events []CalendarEvent, now time.Time) (adde
 	// Reconcile vanished calendar tasks: drop un-acted ones, keep Done tombstones.
 	var remaining []Task
 	for _, t := range s.Tasks {
-		if t.Source == "calendar" && t.CalUID != "" && !eligible[t.CalUID] {
+		if t.Source == source && t.CalUID != "" && !eligible[t.CalUID] {
 			if !t.Done {
 				dropped++
 				continue
