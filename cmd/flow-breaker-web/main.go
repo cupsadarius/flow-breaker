@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"io/fs"
 	"log"
@@ -16,6 +17,7 @@ var webFS embed.FS
 
 type config struct {
 	addr, pi, users, hosts, data, subject string
+	ntfyURL, ntfyTopic, ntfyToken         string
 }
 
 func env(key, def string) string {
@@ -27,12 +29,15 @@ func env(key, def string) string {
 
 func loadConfig() config {
 	return config{
-		addr:    env("WEB_ADDR", ":8091"),
-		pi:      env("FLOW_BREAKER_URL", "http://localhost:7777"),
-		users:   os.Getenv("WEB_ALLOWED_USERS"),
-		hosts:   os.Getenv("WEB_ALLOWED_HOSTS"),
-		data:    env("WEB_DATA", "/data"),
-		subject: env("VAPID_SUBJECT", "mailto:admin@localhost"),
+		addr:      env("WEB_ADDR", ":8091"),
+		pi:        env("FLOW_BREAKER_URL", "http://localhost:7777"),
+		users:     os.Getenv("WEB_ALLOWED_USERS"),
+		hosts:     os.Getenv("WEB_ALLOWED_HOSTS"),
+		data:      env("WEB_DATA", "/data"),
+		subject:   env("VAPID_SUBJECT", "mailto:admin@localhost"),
+		ntfyURL:   os.Getenv("NTFY_URL"),
+		ntfyTopic: env("NTFY_TOPIC", "flow"),
+		ntfyToken: os.Getenv("NTFY_TOKEN"),
 	}
 }
 
@@ -51,6 +56,12 @@ func main() {
 	p, err := newPusher(cfg.data, cfg.subject)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if cfg.ntfyURL != "" {
+		sub := &ntfySub{base: cfg.ntfyURL, topic: cfg.ntfyTopic, token: cfg.ntfyToken, push: p.Send}
+		go sub.run(context.Background())
+	} else {
+		log.Printf("NTFY_URL unset: no alarm notifications")
 	}
 	log.Printf("flow-breaker-web on %s → %s", cfg.addr, cfg.pi)
 	log.Fatal(http.ListenAndServe(cfg.addr, newMux(cfg, p)))
