@@ -35,7 +35,12 @@ func call(h http.Handler, method, path, body string) *httptest.ResponseRecorder 
 
 func testMux(t *testing.T, pi string) http.Handler {
 	t.Helper()
-	return newMux(config{pi: pi, users: "me@example.com", hosts: "example.com", data: t.TempDir()})
+	cfg := config{pi: pi, users: "me@example.com", hosts: "example.com", data: t.TempDir()}
+	p, err := newPusher(cfg.data, "mailto:me@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newMux(cfg, p)
 }
 
 func TestProxyForwardsAllowed(t *testing.T) {
