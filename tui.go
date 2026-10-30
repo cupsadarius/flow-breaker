@@ -31,6 +31,7 @@ type model struct {
 	report         *StatusReport
 	offline        bool      // true when the daemon is unreachable (fail loud, use cache)
 	lastSync       time.Time // wall-clock time of the last successful daemon sync
+	alertedID      int       // task ID of the alarm already alerted locally (0 = none)
 	cursor         int
 	width          int
 	height         int
@@ -197,7 +198,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		return m, tea.Batch(tickCmd(), syncCmd())
+		cmds := []tea.Cmd{tickCmd(), syncCmd()}
+		select {
+		case res := <-macAlertResult:
+			cmds = append(cmds, m.dialogActionCmd(res))
+		default:
+		}
+		return m, tea.Batch(cmds...)
 
 	case syncMsg:
 		return m, m.applySync(msg)
@@ -264,10 +271,53 @@ func (m *model) applySync(msg syncMsg) tea.Cmd {
 	m.store.Tasks = msg.tasks
 	m.report = msg.report
 	m.clampCursors()
+	m.syncAlert()
 	// Settings are fetched once at Init; if the daemon was down then (or the
 	// settings fetch failed), refresh them now that we've reconnected.
 	if wasOffline {
 		return fetchSettingsCmd()
+	}
+	return nil
+}
+
+// Swapped in tests so syncAlert can run without osascript/say/rex side effects.
+var (
+	alertFn      = alertAll
+	clearAlertFn = clearPaneAlert
+)
+
+// syncAlert raises local alerts (notification, sound, pane switch…) once per
+// firing alarm, and clears the pane status when the alarm stops. The daemon
+// owns firing; this only reacts to its edges as seen in /status.
+func (m *model) syncAlert() {
+	r := m.report
+	if r != nil && r.AlarmFiring && r.AlarmTask != nil {
+		if r.AlarmTask.ID != m.alertedID {
+			m.alertedID = r.AlarmTask.ID
+			alertFn("Flow Breaker", r.AlarmTask.Desc, &m.store.Settings)
+		}
+		return
+	}
+	if m.alertedID != 0 {
+		m.alertedID = 0
+		clearAlertFn()
+	}
+}
+
+// dialogActionCmd maps a macAlert button to the matching daemon action on the
+// alerted task.
+func (m model) dialogActionCmd(button string) tea.Cmd {
+	if m.alertedID == 0 {
+		return nil
+	}
+	body := map[string]any{"source": "tui"}
+	switch {
+	case strings.Contains(button, "Snooze"):
+		return taskActionCmd("POST", fmt.Sprintf("/task/%d/snooze", m.alertedID), body, "Snoozed")
+	case strings.Contains(button, "Done"):
+		return taskActionCmd("POST", fmt.Sprintf("/task/%d/done", m.alertedID), body, "Marked done")
+	case strings.Contains(button, "Dismiss"):
+		return taskActionCmd("POST", fmt.Sprintf("/task/%d/dismiss", m.alertedID), body, "Dismissed")
 	}
 	return nil
 }
@@ -1530,7 +1580,7 @@ var settingsLabels = [10]string{
 	"Text-to-speech",
 	"System sound",
 	"Terminal bell",
-	"Tmux flash",
+	"Pane switch (tmux/Rex)",
 	"─── Calendar ───",
 	"Calendar feeds",
 	"Cache duration (min)",

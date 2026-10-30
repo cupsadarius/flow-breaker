@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestApplySyncErrorGoesOffline verifies a failed daemon refresh flips the model
 // to offline while retaining the last-known cache and report (fail loud, never a
@@ -64,5 +67,39 @@ func TestApplySyncClampsCursor(t *testing.T) {
 	m.applySync(syncMsg{tasks: []Task{{ID: 1}}, report: &StatusReport{}})
 	if m.cursor != 0 {
 		t.Fatalf("cursor = %d, want 0 after list shrank to 1", m.cursor)
+	}
+}
+
+// TestSyncAlertEdges verifies local alerts fire once per firing alarm (not on
+// every sync) and the pane status clears when the alarm stops.
+func TestSyncAlertEdges(t *testing.T) {
+	var fired []string
+	cleared := 0
+	alertFn = func(_, body string, _ *Settings) { fired = append(fired, body) }
+	clearAlertFn = func() { cleared++ }
+	t.Cleanup(func() { alertFn, clearAlertFn = alertAll, clearPaneAlert })
+
+	firing := func(id int, desc string) *StatusReport {
+		return &StatusReport{AlarmFiring: true, AlarmTask: &Task{ID: id, Desc: desc}}
+	}
+	m := &model{store: &Store{}}
+	m.applySync(syncMsg{report: firing(1, "stretch")})
+	m.applySync(syncMsg{report: firing(1, "stretch")})
+	m.applySync(syncMsg{report: firing(2, "water")})
+	m.applySync(syncMsg{report: &StatusReport{}})
+	m.applySync(syncMsg{report: &StatusReport{}})
+	m.applySync(syncMsg{report: firing(1, "stretch")}) // re-fire after snooze
+
+	if want := []string{"stretch", "water", "stretch"}; strings.Join(fired, ",") != strings.Join(want, ",") {
+		t.Fatalf("fired = %v, want %v", fired, want)
+	}
+	if cleared != 1 {
+		t.Fatalf("cleared = %d, want 1", cleared)
+	}
+}
+
+func TestOscText(t *testing.T) {
+	if got := oscText("a;b\x1b]0;x\x07\nc"); got != "a b ]0 x  c" {
+		t.Fatalf("oscText = %q", got)
 	}
 }

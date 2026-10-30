@@ -60,7 +60,7 @@ func main() {
 	// display cache (tasks + settings) from disk; each tick refreshes it from the
 	// daemon over HTTP. The daemon (flow-breaker daemon) is the sole writer.
 	s := loadStore()
-	captureTmuxPane()
+	capturePane()
 
 	m := model{store: s}
 

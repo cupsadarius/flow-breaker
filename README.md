@@ -7,7 +7,7 @@ Terminal daily planner that breaks your flow — with alerts, habit tracking, an
 ## Features
 
 - **TUI planner** built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) + [Lip Gloss](https://github.com/charmbracelet/lipgloss)
-- **6 independent alert types** — notification, modal dialog, text-to-speech, system sound, terminal bell, tmux pane flash
+- **6 independent alert types** — notification, modal dialog, text-to-speech, system sound, terminal bell, pane switch (tmux or Rex)
 - **Habit tracker** — inline weekly dots per task, full-history grid view
 - **Unix socket API** — query status, nudge, next task, overdue list, alarm state from any script
 - **Status file** — JSON updated every 500ms while the TUI runs
@@ -191,12 +191,12 @@ Six alert types fire independently when a task becomes due. Toggle each on/off i
 
 | Alert | What it does | Requirement |
 |-------|-------------|-------------|
-| **Notification** | macOS Notification Center with "Glass" sound | macOS + `osascript` |
+| **Notification** | macOS Notification Center with "Glass" sound. In Rex: a Rex notification (OSC 777) instead | macOS + `osascript`, or Rex |
 | **Modal dialog** | AppleScript alert with Snooze/Done/Dismiss buttons | macOS + `osascript` |
 | **Text-to-speech** | `say -v Samantha` reads the task description | macOS |
 | **System sound** | Plays "Funk" system sound via `afplay` | macOS |
 | **Terminal bell** | Prints `\a` (BEL character) | Any terminal |
-| **Tmux flash** | Displays message + flashes pane red for 3 seconds | tmux session |
+| **Pane switch (tmux/Rex)** | tmux: switches to the pane, shows message, flashes it red for 3s. Rex: shows the session + tab, focuses the pane, marks it blocked (OSC 7501) until the alarm clears | tmux or Rex session |
 
 While an alarm is active the TUI also plays a "Ping" sound and terminal bell (`\a`) every ~5 seconds.
 
@@ -358,7 +358,7 @@ Settings are stored inside `tasks.json` and edited via the TUI settings screen (
 | Text-to-speech | on | on/off |
 | System sound | on | on/off |
 | Terminal bell | on | on/off |
-| Tmux flash | on | on/off |
+| Pane switch (tmux/Rex) | on | on/off |
 | Calendar enabled | off | on/off |
 | Calendar cache | 15 min | 1–120 min |
 

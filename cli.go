@@ -1460,5 +1460,5 @@ TUI KEYS:
 
 ALERTS (macOS):
   Notification Center · modal dialog · text-to-speech
-  system sound · terminal bell · tmux pane flash`)
+  system sound · terminal bell · pane switch (tmux / Rex)`)
 }
