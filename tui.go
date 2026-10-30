@@ -1704,15 +1704,6 @@ func boolVal(b bool) string {
 	return dimStyle.Render("OFF")
 }
 
-func weekStart(t time.Time) time.Time {
-	wd := t.Weekday()
-	if wd == time.Sunday {
-		wd = 7
-	}
-	d := t.AddDate(0, 0, -int(wd-time.Monday))
-	return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, t.Location())
-}
-
 var calBoxStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("14"))
 
