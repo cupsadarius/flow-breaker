@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -253,5 +255,33 @@ func TestHelpOverlayRoutes(t *testing.T) {
 	m, _ = press(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.settingsMode {
 		t.Fatalf("esc did not close settings")
+	}
+}
+
+// TestDeleteTargetsRowFromConfirmTime: a sync between d and y must not move
+// the delete onto another task.
+func TestDeleteTargetsRowFromConfirmTime(t *testing.T) {
+	now := midDay(t)
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Method + " " + r.URL.Path
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("FLOW_BREAKER_URL", srv.URL)
+
+	a := Task{ID: 1, Time: now.Add(-time.Hour).Format("15:04"), Desc: "a", Recurrence: Daily}
+	b := Task{ID: 2, Time: now.Add(time.Hour).Format("15:04"), Desc: "b", Recurrence: Daily}
+	m := model{store: &Store{Tasks: []Task{a, b}}, width: 120, height: 40}
+	m, _ = press(t, m, runes("d"))
+	a.Done = true // done elsewhere; b moves to row 0
+	m.store.Tasks = []Task{a, b}
+	m, cmd := press(t, m, runes("y"))
+	if cmd == nil {
+		t.Fatal("no delete command")
+	}
+	cmd()
+	if got != "DELETE /task/1" {
+		t.Fatalf("request = %q, want DELETE /task/1", got)
 	}
 }

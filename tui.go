@@ -60,6 +60,7 @@ type model struct {
 	bar         barMode
 	barText     string
 	helpOpen    bool
+	targetID    int // task or inbox item a pending delete or schedule acts on
 	// archive view
 	archiveMode   bool
 	archiveCursor int
@@ -386,14 +387,12 @@ func (m model) handleConfirmDel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.setMsg("daemon down")
 			return m, nil
 		}
-		if t, ok := m.selectedInbox(); ok {
-			return m, taskActionCmd("DELETE", fmt.Sprintf("/inbox/%d", t.ID),
+		if m.focus == paneInbox {
+			return m, taskActionCmd("DELETE", fmt.Sprintf("/inbox/%d", m.targetID),
 				map[string]any{"source": "tui"}, "Deleted from inbox")
 		}
-		if t, ok := m.selectedTask(); ok {
-			return m, taskActionCmd("DELETE", fmt.Sprintf("/task/%d", t.ID),
-				map[string]any{"source": "tui"}, "Deleted")
-		}
+		return m, taskActionCmd("DELETE", fmt.Sprintf("/task/%d", m.targetID),
+			map[string]any{"source": "tui"}, "Deleted")
 	default:
 		m.confirmDel = false
 	}
@@ -1007,13 +1006,7 @@ func (m model) View() string {
 	}
 
 	if m.confirmDel {
-		t, ok := m.selectedInbox()
-		if !ok {
-			t, ok = m.selectedTask()
-		}
-		if ok {
-			b.WriteString(urgentStyle.Render(fmt.Sprintf("  Delete '%s'? (y/n)", t.Desc)) + "\n")
-		}
+		b.WriteString(urgentStyle.Render(fmt.Sprintf("  Delete '%s'? (y/n)", m.targetDesc())) + "\n")
 	}
 	if m.msg != "" && time.Now().Before(m.msgExpiry) {
 		b.WriteString(msgStyle.Render("  "+m.msg) + "\n")

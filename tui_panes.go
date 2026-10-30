@@ -146,7 +146,7 @@ func (m model) handleToday(key string) (tea.Model, tea.Cmd) {
 	case "e":
 		m.startInput(t)
 	case "d", "x":
-		m.confirmDel = true
+		m.confirmDel, m.targetID = true, t.ID
 	}
 	return m, nil
 }
@@ -350,6 +350,16 @@ const (
 	barSchedule
 )
 
+// targetDesc names the task or inbox item m.targetID points at.
+func (m model) targetDesc() string {
+	for _, t := range append(m.store.ActiveTasks(), m.inbox...) {
+		if t.ID == m.targetID {
+			return t.Desc
+		}
+	}
+	return fmt.Sprintf("#%d", m.targetID)
+}
+
 func (m model) selectedInbox() (Task, bool) {
 	if m.focus != paneInbox || m.inboxCursor >= len(m.inbox) {
 		return Task{}, false
@@ -359,14 +369,15 @@ func (m model) selectedInbox() (Task, bool) {
 
 func (m model) handleInbox(key string) (tea.Model, tea.Cmd) {
 	m.inboxCursor = moveCursor(m.inboxCursor, len(m.inbox), key)
-	if _, ok := m.selectedInbox(); !ok {
+	t, ok := m.selectedInbox()
+	if !ok {
 		return m, nil
 	}
 	switch key {
 	case "enter":
-		m.bar, m.barText = barSchedule, ""
+		m.bar, m.barText, m.targetID = barSchedule, "", t.ID
 	case "d", "x":
-		m.confirmDel = true
+		m.confirmDel, m.targetID = true, t.ID
 	}
 	return m, nil
 }
@@ -404,9 +415,7 @@ func (m model) handleBar(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if mode == barAdd {
 			return m, captureCmd(text)
 		}
-		if t, ok := m.selectedInbox(); ok {
-			return m, scheduleCmd(t.ID, text)
-		}
+		return m, scheduleCmd(m.targetID, text)
 	default:
 		if len(msg.Runes) > 0 {
 			m.barText += string(msg.Runes)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -429,5 +430,50 @@ func TestFindTaskByID(t *testing.T) {
 	}
 	if _, err := s.findTaskByID(99); err == nil {
 		t.Fatal("want error for missing id 99")
+	}
+}
+
+// TestHabitsDuringResetNoRace reads habits while resetDaily records history;
+// run with -race.
+func TestHabitsDuringResetNoRace(t *testing.T) {
+	s := newTestStore(t)
+	s.addTaskSource("09:00", "", "read", Daily, nil, nil, "cli")
+	s.mu.Lock()
+	s.Tasks[0].History = map[string]bool{"2000-01-01": true}
+	s.Tasks[0].CreatedAt = time.Now().AddDate(0, 0, -40).Format(time.RFC3339)
+	s.mu.Unlock()
+	stop := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			s.mu.Lock()
+			s.LastReset = fmt.Sprintf("2000-02-%02d", i%28+1)
+			s.Tasks[0].Done = true
+			s.mu.Unlock()
+			s.resetDaily()
+		}
+		close(stop)
+	}()
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+			buildHabits(s.ActiveTasks(), time.Now())
+		}
+	}
+}
+
+func TestScheduleInboxStampsCreatedNow(t *testing.T) {
+	s := newTestStore(t)
+	item := s.addInbox("call plumber", "cli")
+	s.mu.Lock()
+	s.Inbox[0].CreatedAt = time.Now().AddDate(0, 0, -5).Format(time.RFC3339)
+	s.mu.Unlock()
+	task, err := s.scheduleInbox(item.ID, ParseResult{Time: "09:00", Recurrence: Daily}, "tui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := createdOnDate(task).Format("2006-01-02"); got != time.Now().Format("2006-01-02") {
+		t.Fatalf("CreatedAt day = %s, want today", got)
 	}
 }

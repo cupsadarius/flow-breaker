@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -251,7 +252,7 @@ func (s *Store) findInboxByID(id int) (int, error) {
 }
 
 // scheduleInbox moves an inbox item to the tasks, timed by res. The task keeps
-// the item's ID, Desc and Source.
+// the item's ID and Desc.
 func (s *Store) scheduleInbox(id int, res ParseResult, source string) (Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,6 +262,7 @@ func (s *Store) scheduleInbox(id int, res ParseResult, source string) (Task, err
 	}
 	t := s.Inbox[i]
 	t.Time, t.Date, t.Recurrence, t.Days, t.Source = res.Time, res.Date, res.Recurrence, res.Days, source
+	t.CreatedAt = time.Now().Format(time.RFC3339) // habits start counting from the schedule day
 	s.Inbox = append(s.Inbox[:i], s.Inbox[i+1:]...)
 	s.Tasks = append(s.Tasks, t)
 	s.sortTasks()
@@ -385,8 +387,7 @@ func (s *Store) editTaskSource(id int, timeStr, desc *string, rec *Recurrence, t
 		return Task{}, fmt.Errorf("task %d not found", id)
 	}
 	// Returned Task is a value copy; its Days/Tags/History still alias the
-	// stored slices/map. Safe today because writers reassign slices wholesale
-	// (no in-place History writer exists yet).
+	// stored slices/map. Safe because every writer replaces them wholesale.
 	return s.Tasks[i], nil
 }
 
@@ -655,10 +656,13 @@ func (s *Store) resetDaily() {
 	// record yesterday's completions in history before clearing
 	for i := range s.Tasks {
 		if s.Tasks[i].Done {
-			if s.Tasks[i].History == nil {
-				s.Tasks[i].History = make(map[string]bool)
+			// Copy on write: readers hold the old map after the lock drops.
+			h := maps.Clone(s.Tasks[i].History)
+			if h == nil {
+				h = make(map[string]bool)
 			}
-			s.Tasks[i].History[s.LastReset] = true
+			h[s.LastReset] = true
+			s.Tasks[i].History = h
 		}
 	}
 	// archive once-tasks that were created before today
