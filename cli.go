@@ -309,6 +309,9 @@ func cliNudge(args []string) {
 		}
 	}
 	nudgeWithClient(newClientTimeout(800*time.Millisecond), quiet, os.Stdout)
+	if w := calSyncNotice(); w != "" && !quiet {
+		fmt.Println("⚠️ " + w)
+	}
 }
 
 // nudgeWithClient GETs the daemon's nudge text over c and writes it to out.

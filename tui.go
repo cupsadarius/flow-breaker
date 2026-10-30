@@ -61,6 +61,7 @@ type model struct {
 	barText     string
 	helpOpen    bool
 	targetID    int // task or inbox item a pending delete or schedule acts on
+	calWarn     string
 	// archive view
 	archiveMode   bool
 	archiveCursor int
@@ -166,6 +167,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
+		m.calWarn = calSyncNotice()
 		cmds := []tea.Cmd{tickCmd(), syncCmd()}
 		select {
 		case res := <-macAlertResult:
@@ -957,6 +959,9 @@ func (m model) View() string {
 	h := max(m.height, minHeight)
 
 	title := headerStyle.Render("flow-breaker") + "  " + dimStyle.Render(time.Now().Format("Mon 2 Jan · 15:04"))
+	if m.calWarn != "" {
+		title += "  " + urgentStyle.Render("⚠ "+m.calWarn)
+	}
 	dot := habitDoneStyle.Render("●") + dimStyle.Render(" daemon")
 	if m.offline {
 		dot = urgentStyle.Render("●") + dimStyle.Render(" daemon")
