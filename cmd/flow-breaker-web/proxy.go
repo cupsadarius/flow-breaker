@@ -11,7 +11,7 @@ import (
 // relative to /api/.
 var proxyRoutes = map[string]*regexp.Regexp{
 	http.MethodGet:    regexp.MustCompile(`^(tasks|status|inbox|habits)$`),
-	http.MethodPost:   regexp.MustCompile(`^(capture|task/\d+(/(done|snooze|dismiss))?|inbox/\d+/schedule)$`),
+	http.MethodPost:   regexp.MustCompile(`^(capture|task/\d+(/(done|undo|snooze|dismiss))?|inbox/\d+/schedule)$`),
 	http.MethodDelete: regexp.MustCompile(`^inbox/\d+$`),
 }
 

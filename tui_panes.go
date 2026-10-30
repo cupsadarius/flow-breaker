@@ -140,6 +140,9 @@ func (m model) handleToday(key string) (tea.Model, tea.Cmd) {
 	body := map[string]any{"source": "tui"}
 	switch key {
 	case "enter":
+		if t.Done {
+			return m, taskActionCmd("POST", fmt.Sprintf("/task/%d/undo", t.ID), body, "Marked not done")
+		}
 		return m, taskActionCmd("POST", fmt.Sprintf("/task/%d/done", t.ID), body, "Marked done")
 	case "s":
 		return m, taskActionCmd("POST", fmt.Sprintf("/task/%d/snooze", t.ID), body, "Snoozed")

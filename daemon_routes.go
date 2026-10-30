@@ -123,8 +123,8 @@ func captureEcho(res ParseResult) string {
 	return prefix + res.Time + " — " + res.Desc
 }
 
-// handleDone handles POST /task/{id}/done.
-func handleDone(store *Store) http.HandlerFunc {
+// handleDone handles POST /task/{id}/done and POST /task/{id}/undo.
+func handleDone(store *Store, done bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := pathID(w, r)
 		if !ok {
@@ -134,7 +134,7 @@ func handleDone(store *Store) http.HandlerFunc {
 			Source string `json:"source"`
 		}
 		json.NewDecoder(r.Body).Decode(&body) // body optional
-		t, err := store.markDone(id, defaultSource(body.Source))
+		t, err := store.setDone(id, done, defaultSource(body.Source))
 		if err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return

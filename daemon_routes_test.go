@@ -850,3 +850,19 @@ func TestCaptureRejectsEmptyText(t *testing.T) {
 		t.Fatalf("inbox has %d items, want 0", n)
 	}
 }
+
+func TestUndoDone(t *testing.T) {
+	store := newTestStore(t)
+	srv := httptest.NewServer(newDaemonMux(store, newScheduler(store)))
+	defer srv.Close()
+	seed := store.addTaskSource("09:00", "", "task", Daily, nil, nil, "tui")
+
+	doJSON(t, "POST", fmt.Sprintf("%s/task/%d/done", srv.URL, seed.ID), map[string]any{"source": "tui"})
+	resp := doJSON(t, "POST", fmt.Sprintf("%s/task/%d/undo", srv.URL, seed.ID), map[string]any{"source": "tui"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if store.Tasks[0].Done {
+		t.Fatal("task still done after undo")
+	}
+}

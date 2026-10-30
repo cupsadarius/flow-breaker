@@ -282,16 +282,16 @@ func (s *Store) deleteInbox(id int) error {
 	return nil
 }
 
-// markDone sets Done=true, stamps Source, and persists. Returns the updated
+// setDone sets Done, stamps Source, and persists. Returns the updated
 // task, or an error if the id is not found. Acquires the write lock once.
-func (s *Store) markDone(id int, source string) (Task, error) {
+func (s *Store) setDone(id int, done bool, source string) (Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i, err := s.findTaskByID(id)
 	if err != nil {
 		return Task{}, err
 	}
-	s.Tasks[i].Done = true
+	s.Tasks[i].Done = done
 	s.Tasks[i].Source = source
 	s.saveLocked()
 	return s.Tasks[i], nil

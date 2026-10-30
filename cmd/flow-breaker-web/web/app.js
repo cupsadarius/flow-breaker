@@ -154,10 +154,12 @@ async function act(promise, ok) {
 function openSheet(t) {
   const sheet = $("sheet");
   $("sheet-title").textContent = `${t.time}  ${t.desc}`;
+  sheet.querySelector('[value="done"]').textContent = t.done ? "Not done" : "Done";
   sheet.onclose = () => {
     switch (sheet.returnValue) {
       case "done":
-        act(api("POST", `task/${t.id}/done`), () => "Marked done");
+        if (t.done) act(api("POST", `task/${t.id}/undo`), () => "Marked not done");
+        else act(api("POST", `task/${t.id}/done`), () => "Marked done");
         break;
       case "snooze":
         act(api("POST", `task/${t.id}/snooze`), () => "Snoozed");
