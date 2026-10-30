@@ -87,8 +87,8 @@ One line: name, date and time, and a daemon dot.
 
 - `/` (and `a`) focuses the bar at the bottom. The bar takes free text and sends it to `POST /capture`.
 - The result echo from the daemon shows as the transient message, for example "📥 inbox — …" or the scheduled time.
-- `#word` tokens become tags: `handleCapture` strips them from the text before parsing and stores them as tags (Claude's call; today they stay in the description). The placeholder example must use a phrase the parser already handles, for example "standup every weekday at 9:30 #work".
-- `ctrl+e` in the bar opens the full form for the cases the parser cannot express (custom days, tags). **Builder's call:** keep the current form flow or make it one screen with all fields visible. One screen is preferred.
+- The placeholder example uses a phrase the parser already handles, for example "standup every weekday at 9:30".
+- `ctrl+e` in the bar opens the current add form unchanged, for the cases the parser cannot express (custom days, tags).
 
 ### Keys
 
@@ -101,10 +101,6 @@ One line: name, date and time, and a daemon dot.
 - `q` quit.
 - The footer shows at most 6 keys, for the focused pane.
 
-### Narrow terminals
-
-Below 100 columns, the panes stack: Today on top, then Habits, then Inbox. `tab` still moves focus.
-
 ## Daemon changes
 
 The daemon has no inbox API today. Add:
@@ -112,7 +108,6 @@ The daemon has no inbox API today. Add:
 - `POST /inbox/{id}/schedule` with `{"text": "..."}`: parse the text with the capture parser. On success, move the item to the tasks. On a parse failure, return 422 and leave the item in the inbox.
 - `DELETE /inbox/{id}`.
 - `GET /habits` (see Habits pane).
-- `#tag` extraction in `handleCapture` (see Quick-add bar).
 
 The TUI sync (`syncCmd`, every second) also gets `/inbox` and `/habits`.
 

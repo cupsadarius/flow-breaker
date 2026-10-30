@@ -42,7 +42,7 @@ The user wants events to come from macOS Calendar, which syncs the Google accoun
 - `Info.plist` has `NSCalendarsFullAccessUsageDescription`.
 - The source lives in this repo (for example `macos/FlowBreakerSync/`).
 - `flow-breaker cal-sync --install` builds the app with `swiftc`, writes the bundle, and ad-hoc signs it (`codesign -s -`).
-- An ad-hoc signature ties the calendar grant to one build. `--install` skips the rebuild when a hash of the Swift source matches the installed build. A real helper change costs one new prompt; that is accepted (Claude's call).
+- An ad-hoc signature ties the calendar grant to one build. Each `--install` costs one new prompt; that is accepted (Claude's call).
 
 ### Start: lazy, from flow-breaker
 
@@ -54,11 +54,8 @@ The user wants events to come from macOS Calendar, which syncs the Google accoun
 
 ### Sync loop, inside the helper
 
-- Sync at start.
-- Sync on `EKEventStoreChanged`, debounced (about 5 s).
-- Sync every 15 minutes, and once just after local midnight.
-- Each sync reads today's timed events from the selected calendars.
-- It sends them to the daemon only when a hash of today's list changed since the last successful send.
+- Sync at start, on `EKEventStoreChanged`, and every 15 minutes. The 15-minute tick also loads the new day after midnight.
+- Each sync reads today's timed events and sends them all. `materializeCalendar` is an idempotent upsert, so a repeat send changes nothing.
 - After each attempt, it writes a status file in the flow-breaker data dir (`~/.flow-breaker/calsync.json`): last attempt time, last success time, event count, last error.
 
 ### Daemon route
@@ -79,8 +76,8 @@ The helper uses the same daemon URL and auth as the Go client (`~/.config/flow-b
 
 ### Calendar selection
 
-- `flow-breaker cal-sync --calendars` lists the macOS calendars and stores the selected ones in the helper's config.
-- Default: all calendars of the account that holds `darius@optura.ai`. If that does not exist, all calendars.
+- Sync all calendars of the account that holds `darius@optura.ai`. If that account does not exist, sync all calendars.
+- No picker. Add one when a second account needs it.
 
 ### Staleness
 
@@ -114,5 +111,5 @@ The Feeds overlay becomes a Calendar overlay. It shows:
 ## Left to the builder
 
 - Swift project layout and build flags.
-- Debounce and retry details.
+- Retry details.
 - Status file format, beyond the fields listed.
